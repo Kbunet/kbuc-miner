@@ -141,8 +141,8 @@ class MiningCard extends StatelessWidget {
                     Slider(
                       value: speedMultiplier,
                       min: 0.1,
-                      max: 2.0,
-                      divisions: 19,
+                      max: 5.0,
+                      divisions: 49,
                       label: '${speedMultiplier.toStringAsFixed(1)}x',
                       onChanged: (value) {
                         if (value != null) onSpeedChange(value);

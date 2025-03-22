@@ -86,6 +86,9 @@ class MiningService {
     final receivePort = ReceivePort();
     final completer = Completer<void>();
     
+    // Initialize with default speed multiplier
+    _speedMultipliers[jobId] = 1.0;
+
     // Start the mining isolate
     final isolate = await Isolate.spawn(
       _miningIsolate,
@@ -96,11 +99,12 @@ class MiningService {
         'leader': leader,
         'height': height,
         'owner': owner,
-        'rewardType': rewardType, // Keep as string '0' or '1' per memory requirement
+        'rewardType': rewardType, // Keep as string '0' or '1'
         'difficulty': difficulty,
         'startNonce': startNonce, // Use the potentially updated start nonce
         'endNonce': nonceRange.length > 1 ? nonceRange[1] : -1,
         'startPaused': false, // Start UNPAUSED by default
+        'speedMultiplier': _speedMultipliers[jobId], // Pass initial speed multiplier
       },
     );
     
@@ -108,7 +112,6 @@ class MiningService {
     _isolates[jobId] = isolate;
     _receivePorts[jobId] = receivePort;
     _pausedJobs[jobId] = false;
-    _speedMultipliers[jobId] = 1.0;
 
     debugPrint('Mining started for job: $jobId');
     debugPrint('- Content: $content');
@@ -284,6 +287,7 @@ class MiningService {
     final startNonce = params['startNonce'] as int;
     final endNonce = params['endNonce'] as int;
     final startPaused = params['startPaused'] as bool? ?? false;
+    var speedMultiplier = params['speedMultiplier'] as double? ?? 1.0;
 
     // Create a port for receiving commands
     final receivePort = ReceivePort();
@@ -329,6 +333,11 @@ class MiningService {
         } else if (command == 'stop') {
           debugPrint('Mining isolate received stop command for job: $jobId');
           shouldStop = true;
+        } else if (command == 'speed') {
+          debugPrint('Mining isolate received speed command for job: $jobId');
+          final newSpeedMultiplier = message['value'] as double;
+          debugPrint('  New speed multiplier: $newSpeedMultiplier');
+          speedMultiplier = newSpeedMultiplier;
         }
       }
     });
@@ -356,7 +365,9 @@ class MiningService {
       }
 
       // Process a batch of nonces
-      const batchSize = 1000;
+      // Adjust batch size based on speed multiplier
+      final int batchSize = (1000 * speedMultiplier).round();
+      
       for (int i = 0; i < batchSize; i++) {
         if (shouldStop || isPaused) break;
 
