@@ -1,5 +1,22 @@
 import '../models/mining_job.dart';
 
+// Sorting options
+enum JobSortOption {
+  creationTimeDesc, // Default - recent first
+  creationTimeAsc,
+  difficultyDesc,
+  difficultyAsc,
+}
+
+// Status filter options
+enum JobStatusFilter {
+  all,
+  active,
+  completed,
+  successful,
+  failed,
+}
+
 class MiningJobService {
   List<MiningJob> _jobs = [];
   bool _initialized = false;
@@ -14,6 +31,99 @@ class MiningJobService {
   Future<List<MiningJob>> getAllJobs() async {
     await _ensureInitialized();
     return List.unmodifiable(_jobs);
+  }
+
+  /// Get jobs with sorting and filtering options
+  /// 
+  /// Parameters:
+  /// - sortBy: How to sort the jobs (default: creationTimeDesc - recent first)
+  /// - statusFilter: Filter by job status
+  /// - difficultyRange: Filter by difficulty range [min, max], null means no limit
+  /// - owner: Filter by owner
+  /// - leader: Filter by leader
+  /// - height: Filter by height
+  /// - content: Filter by content (partial match)
+  Future<List<MiningJob>> getFilteredJobs({
+    JobSortOption sortBy = JobSortOption.creationTimeDesc,
+    JobStatusFilter statusFilter = JobStatusFilter.all,
+    List<int>? difficultyRange,
+    String? owner,
+    String? leader,
+    int? height,
+    String? content,
+  }) async {
+    await _ensureInitialized();
+    
+    // Start with all jobs
+    List<MiningJob> filteredJobs = List.from(_jobs);
+    
+    // Apply status filter
+    switch (statusFilter) {
+      case JobStatusFilter.active:
+        filteredJobs = filteredJobs.where((job) => !job.completed && !job.successful).toList();
+        break;
+      case JobStatusFilter.completed:
+        filteredJobs = filteredJobs.where((job) => job.completed).toList();
+        break;
+      case JobStatusFilter.successful:
+        filteredJobs = filteredJobs.where((job) => job.successful).toList();
+        break;
+      case JobStatusFilter.failed:
+        filteredJobs = filteredJobs.where((job) => job.completed && !job.successful).toList();
+        break;
+      case JobStatusFilter.all:
+        // No filtering needed
+        break;
+    }
+    
+    // Apply difficulty filter
+    if (difficultyRange != null && difficultyRange.length == 2) {
+      final minDifficulty = difficultyRange[0];
+      final maxDifficulty = difficultyRange[1];
+      filteredJobs = filteredJobs.where((job) => 
+        job.difficulty >= minDifficulty && job.difficulty <= maxDifficulty
+      ).toList();
+    }
+    
+    // Apply owner filter
+    if (owner != null && owner.isNotEmpty) {
+      filteredJobs = filteredJobs.where((job) => job.owner == owner).toList();
+    }
+    
+    // Apply leader filter
+    if (leader != null && leader.isNotEmpty) {
+      filteredJobs = filteredJobs.where((job) => job.leader == leader).toList();
+    }
+    
+    // Apply height filter
+    if (height != null) {
+      filteredJobs = filteredJobs.where((job) => job.height == height).toList();
+    }
+    
+    // Apply content filter (partial match)
+    if (content != null && content.isNotEmpty) {
+      filteredJobs = filteredJobs.where((job) => 
+        job.content.toLowerCase().contains(content.toLowerCase())
+      ).toList();
+    }
+    
+    // Apply sorting
+    switch (sortBy) {
+      case JobSortOption.creationTimeDesc:
+        filteredJobs.sort((a, b) => b.startTime.compareTo(a.startTime));
+        break;
+      case JobSortOption.creationTimeAsc:
+        filteredJobs.sort((a, b) => a.startTime.compareTo(b.startTime));
+        break;
+      case JobSortOption.difficultyDesc:
+        filteredJobs.sort((a, b) => b.difficulty.compareTo(a.difficulty));
+        break;
+      case JobSortOption.difficultyAsc:
+        filteredJobs.sort((a, b) => a.difficulty.compareTo(b.difficulty));
+        break;
+    }
+    
+    return filteredJobs;
   }
 
   Future<MiningJob?> getJob(String id) async {

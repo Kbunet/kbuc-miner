@@ -1723,7 +1723,7 @@ class MiningService {
       );
       
       // Update in memory - both active and completed collections
-      if (_activeJobs.containsKey(jobId)) {
+      if (_activeJobs[jobId] != null) {
         _activeJobs[jobId] = updatedJob;
       }
       _completedJobs[jobId] = updatedJob;
@@ -1770,5 +1770,51 @@ class MiningService {
       // Re-throw the error for the caller to handle
       throw e;
     }
+  }
+
+  Future<List<MiningJob>> getFilteredJobs({
+    JobSortOption sortBy = JobSortOption.creationTimeDesc,
+    JobStatusFilter statusFilter = JobStatusFilter.all,
+    List<int>? difficultyRange,
+    String? owner,
+    String? leader,
+    int? height,
+    String? content,
+  }) {
+    return _jobService.getFilteredJobs(
+      sortBy: sortBy,
+      statusFilter: statusFilter,
+      difficultyRange: difficultyRange,
+      owner: owner,
+      leader: leader,
+      height: height,
+      content: content,
+    );
+  }
+
+  Future<Map<String, dynamic>> getFilterOptions() async {
+    final allJobs = await _jobService.getAllJobs();
+    
+    // Extract unique values for each filterable field
+    final Set<String> owners = {};
+    final Set<String> leaders = {};
+    final Set<int> heights = {};
+    final Set<int> difficulties = {};
+    
+    for (final job in allJobs) {
+      owners.add(job.owner);
+      leaders.add(job.leader);
+      heights.add(job.height);
+      difficulties.add(job.difficulty);
+    }
+    
+    return {
+      'owners': owners.toList()..sort(),
+      'leaders': leaders.toList()..sort(),
+      'heights': heights.toList()..sort(),
+      'difficulties': difficulties.toList()..sort(),
+      'statusOptions': JobStatusFilter.values,
+      'sortOptions': JobSortOption.values,
+    };
   }
 }

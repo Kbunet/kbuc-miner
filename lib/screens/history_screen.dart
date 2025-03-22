@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import '../models/mining_job.dart';
 import '../services/mining_service.dart';
+import '../services/mining_job_service.dart';
 import '../widgets/mining_job_details.dart';
+import '../widgets/job_filter_panel.dart';
 
 class HistoryScreen extends StatefulWidget {
   final MiningService miningService;
@@ -12,16 +14,39 @@ class HistoryScreen extends StatefulWidget {
   State<HistoryScreen> createState() => _HistoryScreenState();
 }
 
-class _HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderStateMixin {
-  late TabController _tabController;
+class _HistoryScreenState extends State<HistoryScreen> {
   List<MiningJob> _jobs = [];
+  List<MiningJob> _filteredJobs = [];
   bool _isLoading = true;
+  Map<String, dynamic> _filterOptions = {};
+  Map<String, dynamic> _currentFilters = {
+    'sortBy': JobSortOption.creationTimeDesc,
+    'statusFilter': JobStatusFilter.all,
+  };
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
     _loadJobs();
+    _loadFilterOptions();
+  }
+
+  Future<void> _loadFilterOptions() async {
+    try {
+      final options = await widget.miningService.getFilterOptions();
+      setState(() {
+        _filterOptions = options;
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error loading filter options: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _loadJobs() async {
@@ -30,9 +55,20 @@ class _HistoryScreenState extends State<HistoryScreen> with SingleTickerProvider
     });
 
     try {
-      final jobs = await widget.miningService.getAllJobs();
+      // Use the new filtered jobs method
+      final jobs = await widget.miningService.getFilteredJobs(
+        sortBy: _currentFilters['sortBy'],
+        statusFilter: _currentFilters['statusFilter'],
+        difficultyRange: _currentFilters['difficultyRange'],
+        owner: _currentFilters['owner'],
+        leader: _currentFilters['leader'],
+        height: _currentFilters['height'],
+        content: _currentFilters['content'],
+      );
+      
       setState(() {
         _jobs = jobs;
+        _filteredJobs = jobs;
         _isLoading = false;
       });
     } catch (e) {
@@ -50,65 +86,47 @@ class _HistoryScreenState extends State<HistoryScreen> with SingleTickerProvider
     }
   }
 
-  List<MiningJob> _getFilteredJobs(int tabIndex) {
-    switch (tabIndex) {
-      case 0: // All
-        return _jobs;
-      case 1: // Active
-        return _jobs.where((job) => !job.completed).toList();
-      case 2: // Completed
-        return _jobs.where((job) => job.completed).toList();
-      case 3: // Successful
-        return _jobs.where((job) => job.successful).toList();
-      default:
-        return [];
-    }
-  }
-
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
+  void _applyFilters(Map<String, dynamic> filters) {
+    setState(() {
+      _currentFilters = filters;
+    });
+    _loadJobs();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Mining History'),
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: const [
-            Tab(text: 'All'),
-            Tab(text: 'Active'),
-            Tab(text: 'Completed'),
-            Tab(text: 'Successful'),
-          ],
-        ),
+        title: const Text('Mining Jobs'),
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : TabBarView(
-              controller: _tabController,
-              children: List.generate(4, (index) {
-                final filteredJobs = _getFilteredJobs(index);
-                if (filteredJobs.isEmpty) {
-                  return const Center(
-                    child: Text('No jobs found'),
-                  );
-                }
-                return RefreshIndicator(
-                  onRefresh: _loadJobs,
-                  child: ListView.builder(
-                    padding: const EdgeInsets.all(16.0),
-                    itemCount: filteredJobs.length,
-                    itemBuilder: (context, i) {
-                      return MiningJobDetails(job: filteredJobs[i]);
-                    },
-                  ),
-                );
-              }),
-            ),
+      body: Column(
+        children: [
+          // Filter panel
+          JobFilterPanel(
+            onFilterChanged: _applyFilters,
+            filterOptions: _filterOptions,
+            currentFilters: _currentFilters,
+          ),
+          
+          // Jobs list
+          Expanded(
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _filteredJobs.isEmpty
+                    ? const Center(child: Text('No jobs found'))
+                    : RefreshIndicator(
+                        onRefresh: _loadJobs,
+                        child: ListView.builder(
+                          padding: const EdgeInsets.all(16.0),
+                          itemCount: _filteredJobs.length,
+                          itemBuilder: (context, i) {
+                            return MiningJobDetails(job: _filteredJobs[i]);
+                          },
+                        ),
+                      ),
+          ),
+        ],
+      ),
     );
   }
 }
