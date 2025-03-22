@@ -203,6 +203,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 initialValue: _settings.defaultTicketOwner,
                 onSaved: (value) => _settings.defaultTicketOwner = value ?? '',
               ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'CPU Cores for Mining: ${_settings.cpuCores}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  Text('Max: ${NodeSettings.getMaxCpuCores()}'),
+                ],
+              ),
+              Slider(
+                value: _settings.cpuCores.toDouble(),
+                min: 1,
+                max: NodeSettings.getMaxCpuCores().toDouble(),
+                divisions: NodeSettings.getMaxCpuCores() - 1,
+                label: _settings.cpuCores.toString(),
+                onChanged: (value) {
+                  setState(() {
+                    _settings.cpuCores = value.round();
+                  });
+                },
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Higher values use more CPU resources but may increase mining speed.',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey,
+                ),
+              ),
             ],
           ),
         ),

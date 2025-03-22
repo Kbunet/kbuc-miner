@@ -32,7 +32,7 @@ class MinerAppHome extends StatefulWidget {
   State<MinerAppHome> createState() => _MinerAppHomeState();
 }
 
-class _MinerAppHomeState extends State<MinerAppHome> {
+class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver {
   // Map to store active jobs with their details
   final Map<String, Map<String, dynamic>> _jobs = {};
   
@@ -46,34 +46,61 @@ class _MinerAppHomeState extends State<MinerAppHome> {
   void initState() {
     super.initState();
     _loadActiveJobs();
+    
+    // Register app lifecycle listener to save job state when app is paused or stopped
+    WidgetsBinding.instance.addObserver(this);
   }
 
   Future<void> _loadActiveJobs() async {
-    final activeJobs = await _miningService.getActiveJobs();
-    debugPrint('Found ${activeJobs.length} active jobs');
-    
-    for (final job in activeJobs) {
-      debugPrint('Loading active job: ${job.id}');
-      // Store all job details needed for resuming mining
+    try {
+      final activeJobs = await _miningService.getActiveJobs();
+      
       setState(() {
-        _jobs[job.id] = {
-          'content': job.content,
-          'leader': job.leader,
-          'owner': job.owner,
-          'height': job.height,
-          'rewardType': job.rewardType, // Keep as string '0' or '1' per memory requirement
-          'difficulty': job.difficulty,
-          'startNonce': job.lastTriedNonce > job.startNonce ? job.lastTriedNonce : job.startNonce,
-          'endNonce': job.endNonce,
-          'progress': 0.0,
-          'hashRate': 0.0,
-          'remainingTime': 0.0,
-          'speedMultiplier': 1.0,
-          'currentNonce': job.lastTriedNonce, // Initialize with the last tried nonce
-        };
-        // Initialize all loaded jobs as paused
-        _pausedJobs[job.id] = true;
+        for (final job in activeJobs) {
+          // Get the number of active workers for this job
+          final activeWorkers = _miningService.getActiveWorkerCount(job.id);
+          
+          _jobs[job.id] = {
+            'content': job.content,
+            'leader': job.leader,
+            'owner': job.owner,
+            'height': job.height,
+            'rewardType': job.rewardType, // Already stored as string '0' or '1'
+            'difficulty': job.difficulty,
+            'startNonce': job.startNonce,
+            'endNonce': job.endNonce,
+            'progress': 0.0, // Will be updated by mining service
+            'hashRate': 0.0, // Will be updated by mining service
+            'remainingTime': 0.0, // Will be updated by mining service
+            'currentNonce': job.lastTriedNonce,
+            'speedMultiplier': 1.0, // Default speed multiplier
+            'activeWorkers': activeWorkers, // Add active workers count
+          };
+          
+          // Initialize as not paused
+          _pausedJobs[job.id] = false;
+        }
       });
+      
+      // Start listening for updates for each job
+      for (final jobId in _jobs.keys) {
+        _miningService.startMining(
+          jobId: jobId,
+          content: _jobs[jobId]!['content'] as String,
+          leader: _jobs[jobId]!['leader'] as String,
+          owner: _jobs[jobId]!['owner'] as String,
+          height: _jobs[jobId]!['height'] as int,
+          rewardType: _jobs[jobId]!['rewardType'] as String, // Pass as string '0' or '1'
+          difficulty: _jobs[jobId]!['difficulty'] as int,
+          nonceRange: [
+            _jobs[jobId]!['startNonce'] as int,
+            _jobs[jobId]!['endNonce'] as int,
+          ],
+          onUpdate: _handleMiningUpdate,
+        );
+      }
+    } catch (e) {
+      debugPrint('Error loading active jobs: $e');
     }
   }
 
@@ -141,29 +168,55 @@ class _MinerAppHomeState extends State<MinerAppHome> {
   }
 
   void _handleMiningUpdate(Map<String, dynamic> update) {
-    final jobId = update['jobId'] as String;
-    
-    setState(() {
-      // Update job state
-      if (_jobs.containsKey(jobId)) {
+    // Run on UI thread
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      
+      final jobId = update['jobId'] as String;
+      
+      // Check if this job is still in our list
+      if (!_jobs.containsKey(jobId)) {
+        // If not, we might need to add it (for newly created jobs)
+        if (update['status'] == 'running' || update['status'] == 'paused') {
+          // We'll add it to our tracking
+          setState(() {
+            _jobs[jobId] = {
+              'progress': _safeDoubleValue(update['progress']),
+              'hashRate': _safeDoubleValue(update['hashRate']),
+              'remainingTime': _safeDoubleValue(update['remainingTime']),
+              'currentNonce': update['currentNonce'] as int? ?? 0,
+              'speedMultiplier': 1.0,
+              'activeWorkers': _miningService.getActiveWorkerCount(jobId),
+            };
+            _pausedJobs[jobId] = update['isPaused'] as bool? ?? false;
+          });
+        }
+        return;
+      }
+      
+      setState(() {
+        // Get the existing job data
         final job = Map<String, dynamic>.from(_jobs[jobId]!);
         
         // Update job properties from the update
         if (update.containsKey('progress')) {
-          job['progress'] = update['progress'] as double;
+          job['progress'] = _safeDoubleValue(update['progress']);
         }
         if (update.containsKey('hashRate')) {
-          job['hashRate'] = update['hashRate'] as double;
+          job['hashRate'] = _safeDoubleValue(update['hashRate']);
         }
         if (update.containsKey('remainingTime')) {
-          job['remainingTime'] = update['remainingTime'] as double;
+          job['remainingTime'] = _safeDoubleValue(update['remainingTime']);
         }
         if (update.containsKey('currentNonce')) {
           job['currentNonce'] = update['currentNonce'] as int;
         }
         
+        // Update the active workers count
+        job['activeWorkers'] = _miningService.getActiveWorkerCount(jobId);
+        
         _jobs[jobId] = job;
-      }
+      });
       
       // Make sure UI pause state matches the mining service state
       if (update.containsKey('isPaused')) {
@@ -203,6 +256,18 @@ class _MinerAppHomeState extends State<MinerAppHome> {
       }
     });
   }
+  
+  // Helper method to safely convert values to double
+  double _safeDoubleValue(dynamic value) {
+    if (value == null) return 0.0;
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    try {
+      return double.parse(value.toString());
+    } catch (e) {
+      return 0.0;
+    }
+  }
 
   Future<void> _showCreateMiningJobDialog() async {
     final result = await showDialog<Map<String, dynamic>>(
@@ -228,6 +293,7 @@ class _MinerAppHomeState extends State<MinerAppHome> {
           'hashRate': 0.0,
           'remainingTime': 0.0,
           'speedMultiplier': 1.0,
+          'activeWorkers': 0, // Initialize active workers count
         };
         // Initialize as not paused
         _pausedJobs[jobId] = false;
@@ -295,8 +361,26 @@ class _MinerAppHomeState extends State<MinerAppHome> {
 
   @override
   void dispose() {
+    // Save job state and unregister observer when widget is disposed
+    _saveJobState();
+    WidgetsBinding.instance.removeObserver(this);
     _miningService.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Save job state when app is paused or inactive
+    if (state == AppLifecycleState.paused || 
+        state == AppLifecycleState.inactive || 
+        state == AppLifecycleState.detached) {
+      _saveJobState();
+    }
+  }
+  
+  // Save the current state of all active jobs
+  Future<void> _saveJobState() async {
+    await _miningService.saveJobState();
   }
 
   @override
@@ -360,6 +444,7 @@ class _MinerAppHomeState extends State<MinerAppHome> {
                   isPaused: isPaused,
                   speedMultiplier: jobData['speedMultiplier'] as double? ?? 1.0,
                   lastTriedNonce: jobData['currentNonce'] as int? ?? jobData['startNonce'] as int, 
+                  activeWorkers: jobData['activeWorkers'] as int? ?? 0,
                   onPauseResume: () => _togglePause(jobId),
                   onStop: () => _stopMining(jobId),
                   onSpeedChange: (value) => _updateSpeed(jobId, value),

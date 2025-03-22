@@ -9,6 +9,7 @@ class MiningCard extends StatelessWidget {
   final bool isPaused;
   final double speedMultiplier;
   final int lastTriedNonce;
+  final int activeWorkers;
   final VoidCallback onPauseResume;
   final VoidCallback onStop;
   final Function(double) onSpeedChange;
@@ -22,6 +23,7 @@ class MiningCard extends StatelessWidget {
     required this.isPaused,
     required this.speedMultiplier,
     required this.lastTriedNonce,
+    this.activeWorkers = 0,
     required this.onPauseResume,
     required this.onStop,
     required this.onSpeedChange,
@@ -132,6 +134,7 @@ class MiningCard extends StatelessWidget {
                     Text('Hash Rate: ${_formatHashRate(hashRate)}'),
                     Text('Remaining: ${_formatDuration(remainingTime)}'),
                     Text('Current Nonce: ${lastTriedNonce.toString()}'),
+                    Text('Workers: $activeWorkers'),
                   ],
                 ),
                 Column(
