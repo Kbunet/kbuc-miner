@@ -1410,6 +1410,7 @@ class MiningService {
     int lastProcessedNonce = startNonce - 1;
     int hashesProcessed = 0;
     int lastReportTime = DateTime.now().millisecondsSinceEpoch;
+    double speedMultiplier = 1.0; // Default speed multiplier
     
     // Function to start mining
     void startMining() {
@@ -1431,8 +1432,9 @@ class MiningService {
           return;
         }
         
-        // Process a batch of nonces
-        for (int i = 0; i < 100; i++) {
+        // Process a batch of nonces - use speedMultiplier to adjust batch size
+        final batchSize = (100 * speedMultiplier).round();
+        for (int i = 0; i < batchSize; i++) {
           // Check if we've reached the end of our range
           if (lastProcessedNonce >= endNonce) {
             timer.cancel();
@@ -1551,6 +1553,12 @@ class MiningService {
             Future.delayed(Duration(milliseconds: 50), () {
               startMining();
             });
+            break;
+            
+          case 'speed':
+            // Update the speed multiplier
+            speedMultiplier = message['value'] as double;
+            debugPrint('Worker $workerId speed updated to $speedMultiplier');
             break;
         }
       }
