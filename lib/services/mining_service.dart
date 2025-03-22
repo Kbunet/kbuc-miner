@@ -42,8 +42,17 @@ class MiningService {
   final Map<int, double> _workerHashRates = {};
   final Map<String, MiningJob> _completedJobs = {}; // Added to store completed jobs
   
+  // Track the next available nonce for each job
+  final Map<String, int> _nextAvailableNonce = {};
+
+  // Track the current batch end for each job
+  final Map<String, int> _currentBatchEnd = {};
+  
   final StreamController<Map<String, dynamic>> _jobUpdateController = StreamController<Map<String, dynamic>>.broadcast();
   final StreamController<Map<String, dynamic>> _jobCompletedController = StreamController<Map<String, dynamic>>.broadcast();
+  
+  // Map to store job callbacks
+  final Map<String, Function(Map<String, dynamic>)> _jobCallbacks = {};
   
   Stream<Map<String, dynamic>> get jobUpdates => _jobUpdateController.stream;
   Stream<Map<String, dynamic>> get jobCompleted => _jobCompletedController.stream;
@@ -91,7 +100,7 @@ class MiningService {
     return (endNonce - currentNonce) / (hashRate > 0 ? hashRate : 1);
   }
 
-  // This method will start a mining job with multiple workers
+  // Start mining a job
   Future<void> startMining({
     required String jobId,
     required String content,
@@ -112,6 +121,9 @@ class MiningService {
         debugPrint('Job $jobId is already running');
         return;
       }
+      
+      // Store the callback for this job
+      _jobCallbacks[jobId] = onUpdate;
       
       // Create a new job
       final job = MiningJob(
@@ -146,107 +158,89 @@ class MiningService {
         'currentNonce': job.startNonce,
       };
       
+      // Initialize the next available nonce for this job
+      _nextAvailableNonce[jobId] = resumeFromNonce ?? startNonce;
+      
+      // Define the batch size for sequential processing
+      final sequentialBatchSize = 10000000; // 10 million nonces per sequential batch
+      
+      // Calculate the initial batch end
+      _currentBatchEnd[jobId] = min(
+        endNonce,
+        _nextAvailableNonce[jobId]! + sequentialBatchSize - 1
+      );
+      
       // Calculate how many workers to create
       final int workerCount = _maxConcurrentJobs;
       debugPrint('Creating $workerCount workers for job $jobId');
       
-      // Create workers with evenly distributed nonce ranges
-      final totalRange = endNonce - startNonce;
-      final workerRangeSize = totalRange ~/ workerCount;
-      
-      // Flag to indicate if this is a completely new job (not resumed)
-      bool isNewJob = resumeFromNonce == null && (workerLastNonces == null || workerLastNonces.isEmpty);
+      // Create workers with small, evenly distributed batches within the current sequential batch
+      final batchSize = 1000; // Each worker gets 1,000 nonces at a time
       
       for (int i = 0; i < workerCount; i++) {
-        // Calculate worker's range
-        final workerStartNonce = startNonce + (i * workerRangeSize);
-        final workerEndNonce = i == workerCount - 1 
-            ? endNonce 
-            : startNonce + ((i + 1) * workerRangeSize) - 1;
+        // Calculate worker's initial batch
+        int workerBatchStart;
+        int workerBatchEnd;
         
-        // Create a batch for this worker
-        final batchSize = 1000; // Reduced from 10,000 to 1,000
-        
-        // For new jobs, always start from the worker's start range
-        int workerLastNonce;
-        int batchStartNonce;
-        int batchEndNonce;
-        
-        if (isNewJob) {
-          // New job - start from the beginning of the worker's range
-          workerLastNonce = workerStartNonce - 1;
-          batchStartNonce = workerStartNonce;
-          batchEndNonce = min(batchStartNonce + batchSize - 1, workerEndNonce);
+        if (resumeFromNonce == null && (workerLastNonces == null || workerLastNonces.isEmpty)) {
+          // For a new job, distribute workers evenly across the first sequential batch
+          workerBatchStart = _nextAvailableNonce[jobId]! + (i * batchSize);
+          workerBatchEnd = min(workerBatchStart + batchSize - 1, _currentBatchEnd[jobId]!);
         } else {
-          // Resumed job - use saved state if available
-          workerLastNonce = job.workerLastNonces[i] ?? (workerStartNonce - 1);
-          
-          // Make sure the last nonce is within the worker's range
-          if (workerLastNonce < workerStartNonce - 1) {
-            workerLastNonce = workerStartNonce - 1;
-          } else if (workerLastNonce >= workerEndNonce) {
-            workerLastNonce = workerStartNonce - 1; // Reset if outside range
+          // For resumed jobs, use saved state if available
+          if (workerLastNonces != null && workerLastNonces.containsKey(i)) {
+            workerBatchStart = workerLastNonces[i]! + 1;
+          } else {
+            workerBatchStart = _nextAvailableNonce[jobId]! + (i * batchSize);
           }
           
-          // Calculate batch end based on last nonce
-          batchStartNonce = workerLastNonce + 1;
-          batchEndNonce = min(batchStartNonce + batchSize - 1, workerEndNonce);
+          workerBatchEnd = min(workerBatchStart + batchSize - 1, _currentBatchEnd[jobId]!);
         }
+        
+        // Make sure we don't exceed the job's end nonce
+        if (workerBatchStart > endNonce) {
+          // No more work for this worker
+          continue;
+        }
+        
+        // Update the next available nonce
+        _nextAvailableNonce[jobId] = max(_nextAvailableNonce[jobId]!, workerBatchEnd + 1);
         
         // Create the worker
         final worker = MiningWorker(
           id: i,
           jobId: jobId,
-          currentBatchStart: batchStartNonce,
-          currentBatchEnd: batchEndNonce,
-          lastProcessedNonce: workerLastNonce,
+          currentBatchStart: workerBatchStart,
+          currentBatchEnd: workerBatchEnd,
+          lastProcessedNonce: workerBatchStart - 1,
           status: 'initializing',
           isActive: true,
-          startTime: DateTime.now(), // Restored startTime property
+          startTime: DateTime.now(),
         );
         
+        // Add to job workers
         _jobWorkers[jobId]!.add(worker);
         
-        debugPrint('Worker $i for job $jobId assigned range: $batchStartNonce to $batchEndNonce (full range: $workerStartNonce to $workerEndNonce)');
-      }
-      
-      debugPrint('Creating ${_jobWorkers[jobId]!.length} workers for job $jobId');
-      
-      // Start the workers
-      for (final worker in _jobWorkers[jobId]!) {
-        await _createWorker(
+        // Create the worker isolate
+        _createWorker(
           jobId: jobId,
-          workerId: worker.id,
+          workerId: i,
           content: content,
           leader: leader,
           height: height,
           owner: owner,
           rewardType: rewardType, // Pass as string '0' or '1'
           difficulty: difficulty,
-          startNonce: worker.currentBatchStart,
-          endNonce: worker.currentBatchEnd,
-          onUpdate: (update) {
-            _handleWorkerUpdate(update);
-            // Forward update to the UI callback
-            onUpdate({
-              'jobId': jobId,
-              'progress': _jobStats[jobId]?['progress'] ?? 0.0,
-              'hashRate': _jobStats[jobId]?['hashRate'] ?? 0.0,
-              'remainingTime': _jobStats[jobId]?['remainingTime'] ?? 0.0,
-              'currentNonce': _jobStats[jobId]?['currentNonce'] ?? 0,
-              'activeWorkers': _jobStats[jobId]?['activeWorkers'] ?? 0,
-            });
-          },
+          startNonce: workerBatchStart,
+          endNonce: workerBatchEnd,
+          onUpdate: onUpdate,
         );
       }
       
-      // Start the broadcast timer if it's not already running
-      _broadcastTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
-        _broadcastAllJobUpdates();
-      });
-      
       // Save the job state to persist it
-      await _jobService.addJob(job);
+      if (_activeJobs[jobId] != null) {
+        await _jobService.addJob(_activeJobs[jobId]!);
+      }
     });
   }
 
@@ -287,24 +281,25 @@ class MiningService {
       );
     }
     
-    // Calculate the total number of workers and the worker's assigned range
-    final workerCount = _maxConcurrentJobs; 
-    final totalRange = job.endNonce - job.startNonce;
-    final workerRangeSize = totalRange ~/ workerCount;
+    // Define batch size
+    final batchSize = 1000; // Each worker gets 1,000 nonces at a time
     
-    // Calculate this worker's original assigned range
-    final workerStartNonce = job.startNonce + (workerId * workerRangeSize);
-    final workerEndNonce = workerId == workerCount - 1 
-        ? job.endNonce 
-        : job.startNonce + ((workerId + 1) * workerRangeSize) - 1;
+    // Calculate the next batch for this worker
+    int newStart = _nextAvailableNonce[jobId] ?? job.startNonce;
     
-    // Find the next available nonce range within this worker's assigned range
-    // Start from the worker's last processed nonce + 1, but never below the worker's start nonce
-    int newStart = max(worker.lastProcessedNonce + 1, workerStartNonce);
+    // Check if we've reached the end of the current sequential batch
+    if (newStart > _currentBatchEnd[jobId]!) {
+      // Move to the next sequential batch
+      final sequentialBatchSize = 10000000; // 10 million nonces per sequential batch
+      _currentBatchEnd[jobId] = min(
+        job.endNonce,
+        newStart + sequentialBatchSize - 1
+      );
+    }
     
-    // If the new start is beyond the worker's end nonce, the worker has completed its range
-    if (newStart > workerEndNonce) {
-      debugPrint('Worker $workerId has completed its assigned range for job $jobId');
+    // If we've reached the end of the job's range, mark the worker as completed
+    if (newStart > job.endNonce) {
+      debugPrint('Worker $workerId has completed all available nonces for job $jobId');
       
       // Mark the worker as inactive
       _jobWorkers[jobId]![workerIndex] = worker.copyWith(
@@ -323,34 +318,48 @@ class MiningService {
       
       // If all workers have completed their ranges, mark the job as complete
       if (allWorkersCompleted) {
-        debugPrint('All workers have completed their ranges for job $jobId');
-        _activeJobs[jobId] = job.copyWith(
-          completed: true,
-          successful: false,
-        );
+        debugPrint('All workers have completed all available nonces for job $jobId');
+        if (_activeJobs[jobId] != null) {
+          _activeJobs[jobId] = _activeJobs[jobId]!.copyWith(
+            completed: true,
+            successful: false,
+          );
+        }
+        
+        // Notify the callback that the job is complete but unsuccessful
+        final onUpdate = _jobCallbacks[jobId];
+        if (onUpdate != null) {
+          onUpdate({
+            'status': 'completed',
+            'successful': false,
+            'message': 'All nonce ranges exhausted without finding a solution',
+          });
+        }
+        
+        // Save the job state to persist it
+        if (_activeJobs[jobId] != null) {
+          _jobService.addJob(_activeJobs[jobId]!);
+        }
       }
       
       return;
     }
     
-    // Calculate batch size (1,000 nonces per batch)
-    final batchSize = 1000;
+    // Calculate the new batch end
+    int newEnd = min(newStart + batchSize - 1, _currentBatchEnd[jobId]!);
     
-    // Calculate the new batch end, ensuring it's greater than newStart
-    int newEnd = newStart + batchSize - 1; 
-    
-    // Make sure we don't exceed the worker's end nonce
-    if (newEnd > workerEndNonce) {
-      newEnd = workerEndNonce;
+    // Make sure we don't exceed the job's end nonce
+    if (newEnd > job.endNonce) {
+      newEnd = job.endNonce;
     }
     
     // Double-check that the range is valid
-    if (newEnd <= newStart) {
+    if (newEnd < newStart) {
       debugPrint('Invalid range calculated: $newStart to $newEnd for job $jobId');
       return;
     }
     
-    debugPrint('Assigned new batch to worker $workerId for job $jobId: $newStart to $newEnd (within worker range: $workerStartNonce to $workerEndNonce)');
+    debugPrint('Assigned new batch to worker $workerId for job $jobId: $newStart to $newEnd (within sequential batch: ${job.startNonce} to ${_currentBatchEnd[jobId]})');
     
     // Update the worker
     _jobWorkers[jobId]![workerIndex] = worker.copyWith(
@@ -361,12 +370,17 @@ class MiningService {
       isActive: true,
     );
     
+    // Update the next available nonce for this job
+    _nextAvailableNonce[jobId] = newEnd + 1;
+    
     // Update job's worker nonce state
     Map<int, int> updatedWorkerNonces = Map.from(job.workerLastNonces);
     updatedWorkerNonces[workerId] = newStart - 1;
-    _activeJobs[jobId] = job.copyWith(
-      workerLastNonces: updatedWorkerNonces
-    );
+    if (_activeJobs[jobId] != null) {
+      _activeJobs[jobId] = _activeJobs[jobId]!.copyWith(
+        workerLastNonces: updatedWorkerNonces
+      );
+    }
     
     // Send the new batch to the worker
     if (_workerSendPorts.containsKey(jobId) && 
@@ -599,30 +613,47 @@ class MiningService {
     _workerIsolates[jobId]![workerId] = isolate;
     
     // Listen for messages from the worker
-    SendPort? workerSendPort;
-    
-    final subscription = receivePort.listen((message) {
-      if (message is Map<String, dynamic> && message.containsKey('port')) {
-        // Store the worker's send port
-        workerSendPort = message['port'] as SendPort;
-        _workerSendPorts[jobId]![workerId] = workerSendPort;
-        
-        // Send initial command to start mining now that we have the send port
-        workerSendPort?.send({
-          'command': 'newBatch', 
-          'startNonce': startNonce,
-          'endNonce': endNonce,
-          'speedMultiplier': _speedMultipliers[jobId] ?? 1.0,
-        });
-        
-        return;
-      }
-      
-      // Forward the message to the update handler
-      onUpdate(message as Map<String, dynamic>);
-    });
+    final stream = receivePort.asBroadcastStream();
     
     // Store the subscription
+    final subscription = stream.listen((message) {
+      if (message is Map<String, dynamic> && message.containsKey('port')) {
+        // Store the worker's send port
+        _workerSendPorts[jobId]![workerId] = message['port'] as SendPort;
+        
+        // Send the initial speed multiplier to the worker
+        _workerSendPorts[jobId]![workerId]!.send({
+          'command': 'speed',
+          'value': _speedMultipliers[jobId] ?? 1.0,
+        });
+        
+        // Start mining
+        _workerSendPorts[jobId]![workerId]!.send({
+          'command': 'newBatch',
+          'startNonce': startNonce,
+          'endNonce': endNonce,
+        });
+      } else if (message is Map<String, dynamic>) {
+        // Process worker update
+        message['workerId'] = workerId;
+        message['jobId'] = jobId;
+        
+        // Handle worker updates
+        _handleWorkerUpdate(message);
+        
+        // Forward update to the UI callback
+        onUpdate({
+          'jobId': jobId,
+          'progress': _jobStats[jobId]?['progress'] ?? 0.0,
+          'hashRate': _jobStats[jobId]?['hashRate'] ?? 0.0,
+          'remainingTime': _jobStats[jobId]?['remainingTime'] ?? 0.0,
+          'currentNonce': _jobStats[jobId]?['currentNonce'] ?? 0,
+          'activeWorkers': _jobStats[jobId]?['activeWorkers'] ?? 0,
+        });
+      }
+    });
+    
+    // Add the subscription to the list
     _receiveStreams[jobId]!.add(subscription);
   }
   
@@ -707,9 +738,11 @@ class MiningService {
         // Update job's worker nonce state
         Map<int, int> updatedWorkerNonces = Map.from(job.workerLastNonces);
         updatedWorkerNonces[workerId] = lastProcessedNonce;
-        _activeJobs[jobId] = job.copyWith(
-          workerLastNonces: updatedWorkerNonces
-        );
+        if (_activeJobs[jobId] != null) {
+          _activeJobs[jobId] = _activeJobs[jobId]!.copyWith(
+            workerLastNonces: updatedWorkerNonces
+          );
+        }
         
         // Update job stats
         _updateJobStats(jobId);
@@ -732,9 +765,11 @@ class MiningService {
         // Update job's worker nonce state
         Map<int, int> updatedWorkerNonces = Map.from(job.workerLastNonces);
         updatedWorkerNonces[workerId] = lastProcessedNonce;
-        _activeJobs[jobId] = job.copyWith(
-          workerLastNonces: updatedWorkerNonces
-        );
+        if (_activeJobs[jobId] != null) {
+          _activeJobs[jobId] = _activeJobs[jobId]!.copyWith(
+            workerLastNonces: updatedWorkerNonces
+          );
+        }
         
         // Update job stats
         _updateJobStats(jobId);
@@ -847,12 +882,14 @@ class MiningService {
       workerLastNonces: updatedWorkerNonces
     );
     
-    _activeJobs[jobId] = updatedJob;
+    if (_activeJobs[jobId] != null) {
+      _activeJobs[jobId] = updatedJob;
+    }
     
     // Move to completed jobs
     _completedJobs[jobId] = updatedJob;
     
-    // Save the job to persistent storage
+    // Save the job state to persistent storage
     _jobService.updateJob(updatedJob).then((_) {
       debugPrint('Solution found for job $jobId saved to persistent storage');
     }).catchError((error) {
@@ -989,66 +1026,67 @@ class MiningService {
   void _broadcastJobUpdates() {
     // Update all active jobs
     for (final jobId in _activeJobs.keys) {
-      final job = _activeJobs[jobId]!;
+      final job = _activeJobs[jobId];
+      if (job == null) continue;
+      
       final workers = _jobWorkers[jobId] ?? [];
       
       // Calculate aggregate stats
-      double totalHashRate = 0.0;
+      int totalHashesChecked = 0;
       int highestNonce = job.startNonce;
       bool allWorkersCompleted = workers.isNotEmpty;
       
       for (final worker in workers) {
-        totalHashRate += worker.hashRate; 
+        totalHashesChecked += worker.hashesProcessed;
         if (worker.lastProcessedNonce > highestNonce) {
           highestNonce = worker.lastProcessedNonce;
         }
         
-        // Check if any worker is still active
-        if (worker.isActive) {
+        // Check if all workers are completed
+        if (worker.isActive && worker.status != 'completed') {
           allWorkersCompleted = false;
         }
       }
       
       // Calculate progress
       final totalRange = job.endNonce - job.startNonce;
-      final progress = totalRange > 0 
-          ? ((highestNonce - job.startNonce) / totalRange * 100).clamp(0.0, 100.0) 
+      final progress = totalRange > 0
+          ? ((highestNonce - job.startNonce) / totalRange * 100).clamp(0.0, 100.0)
           : 0.0;
       
-      // Calculate remaining time
-      double remainingTime = 0.0;
-      if (totalHashRate > 0 && totalRange > 0) {
-        final remainingHashes = job.endNonce - highestNonce;
-        remainingTime = remainingHashes / (totalHashRate * 1000); // Convert to seconds
-      }
+      // Calculate hash rate and remaining time
+      final hashRate = _calculateStableHashRate(totalHashesChecked, job.startTime, _hashRateHistory[jobId] ?? []);
+      final remainingHashes = job.endNonce - highestNonce;
+      final remainingTime = _calculateStableRemainingTime(
+        highestNonce, job.startNonce, job.endNonce, totalHashesChecked, job.startTime, _hashRateHistory[jobId] ?? []);
       
-      // Check if job is completed
+      // If all workers are completed and the job is not marked as completed, mark it as completed
       if (allWorkersCompleted && !job.completed) {
-        _activeJobs[jobId] = job.copyWith(
-          completed: true,
-          successful: false, // No solution found
-        );
+        if (_activeJobs[jobId] != null) {
+          _activeJobs[jobId] = _activeJobs[jobId]!.copyWith(
+            completed: true,
+            successful: false,
+          );
+        }
       }
       
-      // Notify listeners through the stream controller
+      // Update job stats
+      _jobStats[jobId] = {
+        'progress': progress,
+        'hashRate': hashRate,
+        'remainingTime': remainingTime,
+        'activeWorkers': workers.where((w) => w.isActive).length,
+        'currentNonce': highestNonce,
+      };
+      
+      // Broadcast job update
       _jobUpdateController.add({
         'jobId': jobId,
         'progress': progress,
-        'hashRate': totalHashRate,
+        'hashRate': hashRate,
         'remainingTime': remainingTime,
         'currentNonce': highestNonce,
-        'workerDetails': workers.map((worker) => {
-          'workerId': worker.id,
-          'lastNonce': worker.lastProcessedNonce,
-          'status': worker.status,
-          'hashRate': worker.hashRate,
-          'startNonce': worker.currentBatchStart,
-          'endNonce': worker.currentBatchEnd,
-          'isActive': worker.isActive,
-        }).toList(),
-        'isPaused': _pausedJobs.containsKey(jobId),
-        'isCompleted': _activeJobs[jobId]!.completed,
-        'isSuccessful': _activeJobs[jobId]!.successful,
+        'activeWorkers': workers.where((w) => w.isActive).length,
       });
     }
   }
