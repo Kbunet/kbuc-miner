@@ -22,6 +22,13 @@ class MiningJob {
   final String? broadcastError;
   final String? broadcastHash;
   final int lastTriedNonce; // Added to track the last nonce that was tried
+  final int? completedNonce;
+  final String? completedHash;
+  final Map<int, int> workerLastNonces; // Map of worker ID to last processed nonce
+
+  // Add getters for compatibility with new code
+  bool get isCompleted => completed;
+  bool get isSuccessful => successful;
 
   MiningJob({
     required this.id,
@@ -44,7 +51,10 @@ class MiningJob {
     this.broadcastError,
     this.broadcastHash,
     this.lastTriedNonce = 0, // Default to startNonce if not provided
-  });
+    this.completedNonce,
+    this.completedHash,
+    Map<int, int>? workerLastNonces,
+  }) : this.workerLastNonces = workerLastNonces ?? {};
 
   Duration? get duration {
     if (endTime == null) return null;
@@ -72,30 +82,47 @@ class MiningJob {
     'broadcastError': broadcastError,
     'broadcastHash': broadcastHash,
     'lastTriedNonce': lastTriedNonce, // Added to JSON serialization
+    'completedNonce': completedNonce,
+    'completedHash': completedHash,
+    'workerLastNonces': workerLastNonces.map((key, value) => MapEntry(key.toString(), value)), // Convert int keys to strings for JSON serialization
   };
 
-  factory MiningJob.fromJson(Map<String, dynamic> json) => MiningJob(
-    id: json['id'],
-    content: json['content'],
-    leader: json['leader'],
-    owner: json['owner'],
-    height: json['height'],
-    rewardType: json['rewardType'], // Keep as string per memory requirement
-    difficulty: json['difficulty'],
-    startNonce: json['startNonce'],
-    endNonce: json['endNonce'],
-    startTime: DateTime.parse(json['startTime']),
-    endTime: json['endTime'] != null ? DateTime.parse(json['endTime']) : null,
-    foundNonce: json['foundNonce'],
-    foundHash: json['foundHash'],
-    completed: json['completed'] ?? false,
-    successful: json['successful'] ?? false,
-    error: json['error'],
-    broadcastSuccessful: json['broadcastSuccessful'] ?? false,
-    broadcastError: json['broadcastError'],
-    broadcastHash: json['broadcastHash'],
-    lastTriedNonce: json['lastTriedNonce'] ?? json['startNonce'], // Use startNonce as fallback
-  );
+  factory MiningJob.fromJson(Map<String, dynamic> json) {
+    // Convert workerLastNonces from JSON
+    Map<int, int> workerNonces = {};
+    if (json['workerLastNonces'] != null) {
+      final Map<String, dynamic> noncesMap = Map<String, dynamic>.from(json['workerLastNonces']);
+      noncesMap.forEach((key, value) {
+        workerNonces[int.parse(key)] = value as int;
+      });
+    }
+    
+    return MiningJob(
+      id: json['id'],
+      content: json['content'],
+      leader: json['leader'],
+      owner: json['owner'],
+      height: json['height'],
+      rewardType: json['rewardType'], // Keep as string per memory requirement
+      difficulty: json['difficulty'],
+      startNonce: json['startNonce'],
+      endNonce: json['endNonce'],
+      startTime: DateTime.parse(json['startTime']),
+      endTime: json['endTime'] != null ? DateTime.parse(json['endTime']) : null,
+      foundNonce: json['foundNonce'],
+      foundHash: json['foundHash'],
+      completed: json['completed'] ?? false,
+      successful: json['successful'] ?? false,
+      error: json['error'],
+      broadcastSuccessful: json['broadcastSuccessful'] ?? false,
+      broadcastError: json['broadcastError'],
+      broadcastHash: json['broadcastHash'],
+      lastTriedNonce: json['lastTriedNonce'] ?? json['startNonce'], // Use startNonce as fallback
+      completedNonce: json['completedNonce'],
+      completedHash: json['completedHash'],
+      workerLastNonces: workerNonces,
+    );
+  }
 
   MiningJob copyWith({
     String? id,
@@ -118,6 +145,9 @@ class MiningJob {
     String? broadcastError,
     String? broadcastHash,
     int? lastTriedNonce,
+    int? completedNonce,
+    String? completedHash,
+    Map<int, int>? workerLastNonces,
   }) {
     return MiningJob(
       id: id ?? this.id,
@@ -140,6 +170,9 @@ class MiningJob {
       broadcastError: broadcastError ?? this.broadcastError,
       broadcastHash: broadcastHash ?? this.broadcastHash,
       lastTriedNonce: lastTriedNonce ?? this.lastTriedNonce,
+      completedNonce: completedNonce ?? this.completedNonce,
+      completedHash: completedHash ?? this.completedHash,
+      workerLastNonces: workerLastNonces ?? this.workerLastNonces,
     );
   }
 

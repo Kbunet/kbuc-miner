@@ -49,6 +49,113 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
     
     // Register app lifecycle listener to save job state when app is paused or stopped
     WidgetsBinding.instance.addObserver(this);
+    
+    // Listen to job updates from the mining service
+    _miningService.jobUpdates.listen(_handleStreamUpdate);
+    _miningService.jobCompleted.listen(_handleJobCompleted);
+  }
+  
+  // Handle updates from the mining service stream
+  void _handleStreamUpdate(Map<String, dynamic> update) {
+    if (!mounted) return;
+    
+    final jobId = update['jobId'] as String;
+    
+    // Check if this job is still in our list
+    if (!_jobs.containsKey(jobId)) {
+      // If not, we might need to add it (for newly created jobs)
+      if (update['status'] == 'progress' || update['status'] == 'paused') {
+        // We'll add it to our tracking
+        setState(() {
+          _jobs[jobId] = {
+            'progress': _safeDoubleValue(update['progress']),
+            'hashRate': _safeDoubleValue(update['hashRate']),
+            'remainingTime': _safeDoubleValue(update['remainingTime']),
+            'currentNonce': update['currentNonce'] as int? ?? 0,
+            'speedMultiplier': 1.0,
+            'activeWorkers': _miningService.getActiveWorkerCount(jobId),
+            'workerDetails': update['workerDetails'] != null 
+              ? (update['workerDetails'] as List).cast<Map<String, dynamic>>() 
+              : <Map<String, dynamic>>[],
+          };
+          _pausedJobs[jobId] = update['isPaused'] as bool? ?? false;
+        });
+      }
+      return;
+    }
+    
+    setState(() {
+      // Get the existing job data
+      final job = Map<String, dynamic>.from(_jobs[jobId]!);
+      
+      // Update job properties from the update
+      if (update.containsKey('progress')) {
+        job['progress'] = _safeDoubleValue(update['progress']);
+      }
+      if (update.containsKey('hashRate')) {
+        job['hashRate'] = _safeDoubleValue(update['hashRate']);
+      }
+      if (update.containsKey('remainingTime')) {
+        job['remainingTime'] = _safeDoubleValue(update['remainingTime']);
+      }
+      if (update.containsKey('currentNonce')) {
+        job['currentNonce'] = update['currentNonce'] as int;
+      }
+      
+      // Update the active workers count
+      job['activeWorkers'] = _miningService.getActiveWorkerCount(jobId);
+      
+      if (update.containsKey('workerDetails')) {
+        job['workerDetails'] = update['workerDetails'] != null 
+          ? (update['workerDetails'] as List).cast<Map<String, dynamic>>() 
+          : <Map<String, dynamic>>[];
+      }
+      
+      _jobs[jobId] = job;
+      
+      // Make sure UI pause state matches the mining service state
+      if (update.containsKey('isPaused')) {
+        _pausedJobs[jobId] = update['isPaused'] as bool;
+      }
+    });
+  }
+  
+  // Handle job completed event
+  void _handleJobCompleted(Map<String, dynamic> update) {
+    if (!mounted) return;
+    
+    final jobId = update['jobId'] as String;
+    final status = update['status'] as String?;
+    
+    // Check if we have a solution found
+    if (status == 'found' || update.containsKey('nonce')) {
+      // Show a success notification
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Solution found for job $jobId!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      
+      // Remove the job from the active jobs list in the UI
+      setState(() {
+        _jobs.remove(jobId);
+        _pausedJobs.remove(jobId);
+      });
+    } else if (status == 'completed') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Job $jobId completed without finding solution'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      
+      // Remove the job from the active jobs list in the UI
+      setState(() {
+        _jobs.remove(jobId);
+        _pausedJobs.remove(jobId);
+      });
+    }
   }
 
   Future<void> _loadActiveJobs() async {
@@ -75,6 +182,7 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
             'currentNonce': job.lastTriedNonce,
             'speedMultiplier': 1.0, // Default speed multiplier
             'activeWorkers': activeWorkers, // Add active workers count
+            'workerDetails': [], // Initialize worker details
           };
           
           // Initialize as not paused
@@ -92,11 +200,9 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
           height: _jobs[jobId]!['height'] as int,
           rewardType: _jobs[jobId]!['rewardType'] as String, // Pass as string '0' or '1'
           difficulty: _jobs[jobId]!['difficulty'] as int,
-          nonceRange: [
-            _jobs[jobId]!['startNonce'] as int,
-            _jobs[jobId]!['endNonce'] as int,
-          ],
-          onUpdate: _handleMiningUpdate,
+          startNonce: _jobs[jobId]!['startNonce'] as int,
+          endNonce: _jobs[jobId]!['endNonce'] as int,
+          onUpdate: (_) {}, // Empty callback as we're using streams now
         );
       }
     } catch (e) {
@@ -143,7 +249,8 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
           height: job['height'] as int,
           rewardType: job['rewardType'] as String, // Already a string '0' or '1' per memory requirement
           difficulty: job['difficulty'] as int,
-          nonceRange: [job['startNonce'] as int, job['endNonce'] as int],
+          startNonce: job['startNonce'] as int,
+          endNonce: job['endNonce'] as int,
           onUpdate: _handleMiningUpdate,
         ).then((_) {
           // If we're restarting a job that should be paused, pause it immediately
@@ -187,6 +294,9 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
               'currentNonce': update['currentNonce'] as int? ?? 0,
               'speedMultiplier': 1.0,
               'activeWorkers': _miningService.getActiveWorkerCount(jobId),
+              'workerDetails': update['workerDetails'] != null 
+                ? (update['workerDetails'] as List).cast<Map<String, dynamic>>() 
+                : <Map<String, dynamic>>[],
             };
             _pausedJobs[jobId] = update['isPaused'] as bool? ?? false;
           });
@@ -214,6 +324,12 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
         
         // Update the active workers count
         job['activeWorkers'] = _miningService.getActiveWorkerCount(jobId);
+        
+        if (update.containsKey('workerDetails')) {
+          job['workerDetails'] = update['workerDetails'] != null 
+            ? (update['workerDetails'] as List).cast<Map<String, dynamic>>() 
+            : <Map<String, dynamic>>[];
+        }
         
         _jobs[jobId] = job;
       });
@@ -269,48 +385,61 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
     }
   }
 
-  Future<void> _showCreateMiningJobDialog() async {
-    final result = await showDialog<Map<String, dynamic>>(
+  void _showCreateMiningJobDialog() {
+    showDialog(
       context: context,
-      builder: (context) => const CreateMiningJobDialog(),
+      builder: (context) => CreateMiningJobDialog(
+        onSubmit: (
+          String content,
+          String leader,
+          String owner,
+          int height,
+          String rewardType, // Already a string '0' or '1' per memory requirement
+          int difficulty,
+          int startNonce,
+          int endNonce,
+        ) {
+          // Generate a unique job ID
+          final jobId = DateTime.now().millisecondsSinceEpoch.toString();
+          
+          // Add job to UI state
+          setState(() {
+            _jobs[jobId] = {
+              'content': content,
+              'leader': leader,
+              'owner': owner,
+              'height': height,
+              'rewardType': rewardType, // Store as string '0' or '1' per memory requirement
+              'difficulty': difficulty,
+              'startNonce': startNonce,
+              'endNonce': endNonce,
+              'progress': 0.0,
+              'hashRate': 0.0,
+              'remainingTime': 0.0,
+              'currentNonce': startNonce,
+              'speedMultiplier': 1.0,
+              'activeWorkers': 0,
+              'workerDetails': <Map<String, dynamic>>[],
+            };
+            _pausedJobs[jobId] = false;
+          });
+          
+          // Start mining
+          _miningService.startMining(
+            jobId: jobId,
+            content: content,
+            leader: leader,
+            owner: owner,
+            height: height,
+            rewardType: rewardType, // Pass as string '0' or '1' per memory requirement
+            difficulty: difficulty,
+            startNonce: startNonce,
+            endNonce: endNonce,
+            onUpdate: (_) {}, // Empty callback as we're using streams now
+          );
+        },
+      ),
     );
-
-    if (result != null) {
-      final jobId = DateTime.now().millisecondsSinceEpoch.toString();
-      debugPrint('Creating new job with ID: $jobId');
-      
-      setState(() {
-        _jobs[jobId] = {
-          'content': result['supportedHash'],
-          'leader': result['leader'],
-          'owner': result['jobOwner'],
-          'height': result['height'],
-          'rewardType': result['rewardType'].toString(), // Ensure reward type is a string
-          'difficulty': result['difficulty'],
-          'startNonce': result['nonceRange'][0],
-          'endNonce': result['nonceRange'][1],
-          'progress': 0.0,
-          'hashRate': 0.0,
-          'remainingTime': 0.0,
-          'speedMultiplier': 1.0,
-          'activeWorkers': 0, // Initialize active workers count
-        };
-        // Initialize as not paused
-        _pausedJobs[jobId] = false;
-      });
-
-      await _miningService.startMining(
-        jobId: jobId,
-        content: result['supportedHash'],
-        leader: result['leader'],
-        owner: result['jobOwner'],
-        height: result['height'],
-        rewardType: result['rewardType'].toString(), // Ensure reward type is a string
-        difficulty: result['difficulty'],
-        nonceRange: result['nonceRange'],
-        onUpdate: _handleMiningUpdate,
-      );
-    }
   }
 
   Future<void> _clearAllJobs() async {
@@ -385,18 +514,10 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
 
   @override
   Widget build(BuildContext context) {
-    final activeJobs = _jobs.entries.toList();
-    
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: const Text('Bitcoin Miner'),
+        title: const Text('Miner App'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.delete_sweep),
-            onPressed: _clearAllJobs,
-            tooltip: 'Clear Mining History',
-          ),
           IconButton(
             icon: const Icon(Icons.history),
             onPressed: () {
@@ -407,53 +528,58 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
                 ),
               );
             },
-            tooltip: 'Mining History',
           ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (context) => const SettingsScreen()),
+                MaterialPageRoute(
+                  builder: (context) => const SettingsScreen(),
+                ),
               );
             },
-            tooltip: 'Settings',
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_sweep),
+            onPressed: _clearAllJobs,
           ),
         ],
       ),
-      body: activeJobs.isEmpty
+      body: _jobs.isEmpty
           ? const Center(
-              child: Text(
-                'No active mining jobs\nTap the + button to start mining',
-                textAlign: TextAlign.center,
-              ),
+              child: Text('No active mining jobs'),
             )
           : ListView.builder(
-              itemCount: activeJobs.length,
+              itemCount: _jobs.length,
               itemBuilder: (context, index) {
-                final job = activeJobs[index];
-                final jobId = job.key;
-                final jobData = job.value;
-                final isPaused = _pausedJobs[jobId] ?? false;
+                final jobId = _jobs.keys.elementAt(index);
+                final jobData = _jobs[jobId]!;
+                
+                // Get the job from the mining service for additional details
+                final job = _miningService.getJobSync(jobId);
                 
                 return MiningCard(
                   jobId: jobId,
                   progress: jobData['progress'] as double? ?? 0.0,
                   hashRate: jobData['hashRate'] as double? ?? 0.0,
                   remainingTime: jobData['remainingTime'] as double? ?? 0.0,
-                  isPaused: isPaused,
+                  isPaused: _pausedJobs[jobId] ?? false,
                   speedMultiplier: jobData['speedMultiplier'] as double? ?? 1.0,
-                  lastTriedNonce: jobData['currentNonce'] as int? ?? jobData['startNonce'] as int, 
+                  lastTriedNonce: jobData['currentNonce'] as int? ?? 0,
                   activeWorkers: jobData['activeWorkers'] as int? ?? 0,
-                  onPauseResume: () => _togglePause(jobId),
+                  workerDetails: (jobData['workerDetails'] as List<dynamic>?)
+                      ?.cast<Map<String, dynamic>>() ?? [],
+                  onPause: () => _togglePause(jobId),
+                  onResume: () => _togglePause(jobId),
                   onStop: () => _stopMining(jobId),
                   onSpeedChange: (value) => _updateSpeed(jobId, value),
+                  job: job,
                 );
               },
             ),
       floatingActionButton: FloatingActionButton(
         onPressed: _showCreateMiningJobDialog,
-        tooltip: 'Add Mining Job',
         child: const Icon(Icons.add),
       ),
     );

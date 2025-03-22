@@ -4,7 +4,6 @@ class MiningWorker {
   final int id;
   final String jobId;
   Isolate? isolate;
-  SendPort? sendPort;
   ReceivePort? receivePort;
   int lastProcessedNonce;
   int currentBatchStart;
@@ -13,12 +12,15 @@ class MiningWorker {
   bool isActive;
   DateTime startTime;
   String status;
+  double _hashRate = 0.0;
+
+  // Add getter for hashRate
+  double get hashRate => _hashRate;
 
   MiningWorker({
     required this.id,
     required this.jobId,
     this.isolate,
-    this.sendPort,
     this.receivePort,
     required this.lastProcessedNonce,
     required this.currentBatchStart,
@@ -39,33 +41,45 @@ class MiningWorker {
   double getHashRate() {
     final duration = DateTime.now().difference(startTime).inSeconds;
     if (duration <= 0) return 0;
-    return hashesProcessed / duration;
+    _hashRate = hashesProcessed / duration;
+    return _hashRate;
   }
 
   // Create a copy of this worker with updated properties
   MiningWorker copyWith({
+    int? id,
+    String? jobId,
+    Isolate? isolate,
+    ReceivePort? receivePort,
     int? lastProcessedNonce,
     int? currentBatchStart,
     int? currentBatchEnd,
     bool? isPaused,
     bool? isActive,
-    SendPort? sendPort,
-    Isolate? isolate,
+    DateTime? startTime,
     String? status,
+    double? hashRate,
   }) {
-    return MiningWorker(
-      id: id,
-      jobId: jobId,
+    final worker = MiningWorker(
+      id: id ?? this.id,
+      jobId: jobId ?? this.jobId,
       isolate: isolate ?? this.isolate,
-      sendPort: sendPort ?? this.sendPort,
-      receivePort: receivePort,
+      receivePort: receivePort ?? this.receivePort,
       lastProcessedNonce: lastProcessedNonce ?? this.lastProcessedNonce,
       currentBatchStart: currentBatchStart ?? this.currentBatchStart,
       currentBatchEnd: currentBatchEnd ?? this.currentBatchEnd,
       isPaused: isPaused ?? this.isPaused,
       isActive: isActive ?? this.isActive,
-      startTime: startTime,
+      startTime: startTime ?? this.startTime,
       status: status ?? this.status,
     );
+    
+    if (hashRate != null) {
+      worker._hashRate = hashRate;
+    } else {
+      worker._hashRate = this._hashRate;
+    }
+    
+    return worker;
   }
 }

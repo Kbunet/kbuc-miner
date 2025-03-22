@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:isolate';
+import 'dart:math'; // Added math library import
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:synchronized/synchronized.dart';
@@ -11,35 +12,55 @@ import '../utils/hash_utils.dart';
 import '../models/node_settings.dart'; // Import NodeSettings
 
 class MiningService {
+  // Singleton instance
   static final MiningService _instance = MiningService._internal();
-  final MiningJobService _jobService = MiningJobService();
-  final NodeService _nodeService = NodeService();
   
-  // Maps to track jobs and workers
-  final Map<String, List<MiningWorker>> _jobWorkers = {}; // Maps jobId to its workers
-  final Map<String, StreamSubscription<dynamic>> _receiveStreams = {};
-  final Map<String, bool> _pausedJobs = {};
-  final Map<String, double> _speedMultipliers = {};
+  // Factory constructor
+  factory MiningService() => _instance;
+  
+  // Internal constructor
+  MiningService._internal() {
+    _initializeService();
+  }
+  
+  // Private fields
   final Map<String, MiningJob> _activeJobs = {};
+  final Map<String, List<MiningWorker>> _jobWorkers = {};
+  final Map<String, Map<int, Isolate>> _workerIsolates = {};
+  final Map<String, Map<int, ReceivePort>> _workerPorts = {};
+  final Map<String, Map<int, SendPort?>> _workerSendPorts = {};
+  final Map<String, MiningJob> _pausedJobs = {};
+  final Map<String, double> _speedMultipliers = {};
+  final Map<String, Map<String, dynamic>> _jobStats = {};
   final Map<String, List<double>> _hashRateHistory = {};
   final Map<String, double> _lastRemainingTimes = {};
+  
+  // Isolate management (legacy fields to be removed)
+  final Map<String, List<Isolate>> _isolates = {};
+  final Map<String, List<ReceivePort>> _receivePorts = {};
+  final Map<String, List<StreamSubscription>> _receiveStreams = {};
+  final Map<int, double> _workerHashRates = {};
+  final Map<String, MiningJob> _completedJobs = {}; // Added to store completed jobs
+  
+  final StreamController<Map<String, dynamic>> _jobUpdateController = StreamController<Map<String, dynamic>>.broadcast();
+  final StreamController<Map<String, dynamic>> _jobCompletedController = StreamController<Map<String, dynamic>>.broadcast();
+  
+  Stream<Map<String, dynamic>> get jobUpdates => _jobUpdateController.stream;
+  Stream<Map<String, dynamic>> get jobCompleted => _jobCompletedController.stream;
+  
+  final Lock _lock = Lock();
+  Timer? _broadcastTimer;
+  
+  int _maxConcurrentJobs = 4;
+  
+  // Job service for persistence
+  final MiningJobService _jobService = MiningJobService();
+  final NodeService _nodeService = NodeService();
   
   // Batch size configuration
   static const int _baseBatchSize = 5000; // Base number of nonces per batch
   static const int _minBatchSize = 1000;  // Minimum batch size
   
-  final _lock = Lock();
-  int _maxConcurrentJobs = 1;  // Default to 1 core
-
-  factory MiningService() {
-    return _instance;
-  }
-
-  MiningService._internal() {
-    // Initialize the service
-    _initializeService();
-  }
-
   Future<void> _initializeService() async {
     // Load settings to get the number of CPU cores to use
     final settings = await NodeSettings.load();
@@ -79,314 +100,381 @@ class MiningService {
     required int height,
     required String rewardType, // Kept as string '0' or '1' per memory requirement
     required int difficulty,
-    required List<int> nonceRange,
+    required int startNonce,
+    required int endNonce,
     required Function(Map<String, dynamic>) onUpdate,
     int? resumeFromNonce,
+    Map<int, int>? workerLastNonces,
   }) async {
     await _lock.synchronized(() async {
-      if (_jobWorkers.length >= _maxConcurrentJobs) {
-        debugPrint('Maximum number of concurrent jobs ($_maxConcurrentJobs) reached. Cannot start new job.');
-        return;
-      }
-
-      // Check if this job is already running
-      if (_jobWorkers.containsKey(jobId)) {
+      // Check if the job is already running
+      if (_activeJobs.containsKey(jobId)) {
         debugPrint('Job $jobId is already running');
         return;
       }
-
-      final startNonce = nonceRange[0];
-      final endNonce = nonceRange[1];
       
-      // Determine the actual starting nonce based on resumeFromNonce or the job's last tried nonce
-      int actualStartNonce = startNonce;
+      // Create a new job
+      final job = MiningJob(
+        id: jobId,
+        content: content,
+        leader: leader,
+        owner: owner,
+        height: height,
+        rewardType: rewardType, // Store as string '0' or '1'
+        difficulty: difficulty,
+        startNonce: startNonce,
+        endNonce: endNonce,
+        startTime: DateTime.now(),
+        lastTriedNonce: resumeFromNonce ?? startNonce,
+        completed: false,
+        successful: false,
+        workerLastNonces: workerLastNonces ?? {}, // Initialize with provided worker nonces or empty map
+      );
       
-      // If resumeFromNonce is provided, use it
-      if (resumeFromNonce != null && resumeFromNonce > startNonce) {
-        actualStartNonce = resumeFromNonce;
-        debugPrint('Resuming job $jobId from nonce $actualStartNonce');
-      } else {
-        // Otherwise, check if we have a saved job to resume from
-        try {
-          final savedJob = await _jobService.getJob(jobId);
-          if (savedJob != null && savedJob.lastTriedNonce > startNonce) {
-            actualStartNonce = savedJob.lastTriedNonce;
-            debugPrint('Resuming job $jobId from saved nonce $actualStartNonce');
-          }
-        } catch (e) {
-          debugPrint('Error checking for saved job state: $e');
-        }
-      }
-
-      // Create a new job or update an existing one
-      MiningJob job;
-      try {
-        final existingJob = await _jobService.getJob(jobId);
-        if (existingJob != null) {
-          // Update the existing job
-          job = MiningJob(
-            id: jobId,
-            content: content,
-            leader: leader,
-            owner: owner,
-            height: height,
-            rewardType: rewardType, // Keep as string '0' or '1'
-            difficulty: difficulty,
-            startNonce: startNonce,
-            endNonce: endNonce,
-            startTime: existingJob.startTime,
-            lastTriedNonce: actualStartNonce,
-          );
-          await _jobService.updateJob(job);
-        } else {
-          // Create a new job
-          job = MiningJob(
-            id: jobId,
-            content: content,
-            leader: leader,
-            owner: owner,
-            height: height,
-            rewardType: rewardType, // Keep as string '0' or '1'
-            difficulty: difficulty,
-            startNonce: startNonce,
-            endNonce: endNonce,
-            startTime: DateTime.now(),
-            lastTriedNonce: actualStartNonce,
-          );
-          await _jobService.addJob(job);
-        }
-      } catch (e) {
-        debugPrint('Error creating or updating job: $e');
-        onUpdate({
-          'jobId': jobId,
-          'status': 'error',
-          'message': 'Failed to create or update job: $e',
-        });
-        return;
-      }
-
-      // Store the job in memory
+      // Add to active jobs
       _activeJobs[jobId] = job;
-      _pausedJobs[jobId] = false;
       _speedMultipliers[jobId] = 1.0;
       _hashRateHistory[jobId] = [];
-      _lastRemainingTimes[jobId] = 0.0;
-
-      // Initialize workers list for this job
       _jobWorkers[jobId] = [];
-
-      // Determine the number of workers to create based on available cores
-      final int numWorkers = Platform.numberOfProcessors > 1 
-          ? _maxConcurrentJobs 
-          : 1;
       
-      debugPrint('Starting mining job $jobId with $numWorkers workers');
-      debugPrint('  Content: $content');
-      debugPrint('  Leader: $leader');
-      debugPrint('  Owner: $owner');
-      debugPrint('  Height: $height');
-      debugPrint('  Reward Type: $rewardType'); // Log as string '0' or '1'
-      debugPrint('  Difficulty: $difficulty');
-      debugPrint('  Nonce Range: $actualStartNonce to $endNonce');
-
-      // Create workers
-      for (int i = 0; i < numWorkers; i++) {
-        try {
-          await _createWorker(
-            jobId: jobId,
-            workerId: i,
-            content: content,
-            leader: leader,
-            height: height,
-            owner: owner,
-            rewardType: rewardType, // Pass as string '0' or '1'
-            difficulty: difficulty,
-            startNonce: actualStartNonce + (i * ((endNonce - actualStartNonce) ~/ numWorkers)),
-            endNonce: i == numWorkers - 1 
-                ? endNonce 
-                : actualStartNonce + ((i + 1) * ((endNonce - actualStartNonce) ~/ numWorkers)) - 1,
-            onUpdate: (workerUpdate) {
-              _handleWorkerUpdate(workerUpdate, jobId, onUpdate);
-            },
-            onSolution: (solution) {
-              _handleSolution(solution, jobId, job, onUpdate);
-            },
-          );
-        } catch (e) {
-          debugPrint('Error creating worker $i for job $jobId: $e');
-        }
-      }
-
-      // Start periodic updates for the UI
-      Timer.periodic(const Duration(seconds: 1), (timer) {
-        if (!_jobWorkers.containsKey(jobId)) {
-          timer.cancel();
-          return;
-        }
-
-        // Check if all workers have completed
-        final workers = _jobWorkers[jobId]!;
-        if (workers.isEmpty) {
-          timer.cancel();
-          return;
-        }
-
-        // Check if any worker is still active
-        final anyActive = workers.any((w) => w.status == 'running');
-        if (!anyActive) {
-          timer.cancel();
+      // Initialize job stats
+      _jobStats[jobId] = {
+        'progress': 0.0,
+        'hashRate': 0.0,
+        'remainingTime': 0.0,
+        'activeWorkers': 0,
+        'currentNonce': job.startNonce,
+      };
+      
+      // Calculate how many workers to create
+      final int workerCount = _maxConcurrentJobs;
+      debugPrint('Creating $workerCount workers for job $jobId');
+      
+      // Create workers with evenly distributed nonce ranges
+      final totalRange = endNonce - startNonce;
+      final workerRangeSize = totalRange ~/ workerCount;
+      
+      // Flag to indicate if this is a completely new job (not resumed)
+      bool isNewJob = resumeFromNonce == null && (workerLastNonces == null || workerLastNonces.isEmpty);
+      
+      for (int i = 0; i < workerCount; i++) {
+        // Calculate worker's range
+        final workerStartNonce = startNonce + (i * workerRangeSize);
+        final workerEndNonce = i == workerCount - 1 
+            ? endNonce 
+            : startNonce + ((i + 1) * workerRangeSize) - 1;
+        
+        // Create a batch for this worker
+        final batchSize = 10000;
+        
+        // For new jobs, always start from the worker's start range
+        int workerLastNonce;
+        int batchStartNonce;
+        int batchEndNonce;
+        
+        if (isNewJob) {
+          // New job - start from the beginning of the worker's range
+          workerLastNonce = workerStartNonce - 1;
+          batchStartNonce = workerStartNonce;
+          batchEndNonce = min(batchStartNonce + batchSize - 1, workerEndNonce);
+        } else {
+          // Resumed job - use saved state if available
+          workerLastNonce = job.workerLastNonces[i] ?? (workerStartNonce - 1);
           
-          // Mark the job as completed if all workers are done
-          _completeJob(jobId, false, null, null, onUpdate);
-          return;
+          // Make sure the last nonce is within the worker's range
+          if (workerLastNonce < workerStartNonce - 1) {
+            workerLastNonce = workerStartNonce - 1;
+          } else if (workerLastNonce >= workerEndNonce) {
+            workerLastNonce = workerStartNonce - 1; // Reset if outside range
+          }
+          
+          // Calculate batch end based on last nonce
+          batchStartNonce = workerLastNonce + 1;
+          batchEndNonce = min(batchStartNonce + batchSize - 1, workerEndNonce);
         }
-
-        // Send aggregated update to the UI
-        onUpdate({
-          'jobId': jobId,
-          'status': 'progress',
-          ..._calculateAggregateStats(jobId),
-          'isPaused': _pausedJobs[jobId] ?? false,
-        });
+        
+        // Create the worker
+        final worker = MiningWorker(
+          id: i,
+          jobId: jobId,
+          currentBatchStart: batchStartNonce,
+          currentBatchEnd: batchEndNonce,
+          lastProcessedNonce: workerLastNonce,
+          status: 'initializing',
+          isActive: true,
+          startTime: DateTime.now(), // Restored startTime property
+        );
+        
+        _jobWorkers[jobId]!.add(worker);
+        
+        debugPrint('Worker $i for job $jobId assigned range: $batchStartNonce to $batchEndNonce (full range: $workerStartNonce to $workerEndNonce)');
+      }
+      
+      debugPrint('Creating ${_jobWorkers[jobId]!.length} workers for job $jobId');
+      
+      // Start the workers
+      for (final worker in _jobWorkers[jobId]!) {
+        await _createWorker(
+          jobId: jobId,
+          workerId: worker.id,
+          content: content,
+          leader: leader,
+          height: height,
+          owner: owner,
+          rewardType: rewardType, // Pass as string '0' or '1'
+          difficulty: difficulty,
+          startNonce: worker.currentBatchStart,
+          endNonce: worker.currentBatchEnd,
+          onUpdate: (update) {
+            _handleWorkerUpdate(update);
+            // Forward update to the UI callback
+            onUpdate({
+              'jobId': jobId,
+              'progress': _jobStats[jobId]?['progress'] ?? 0.0,
+              'hashRate': _jobStats[jobId]?['hashRate'] ?? 0.0,
+              'remainingTime': _jobStats[jobId]?['remainingTime'] ?? 0.0,
+              'currentNonce': _jobStats[jobId]?['currentNonce'] ?? 0,
+              'activeWorkers': _jobStats[jobId]?['activeWorkers'] ?? 0,
+            });
+          },
+        );
+      }
+      
+      // Start the broadcast timer if it's not already running
+      _broadcastTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+        _broadcastAllJobUpdates();
       });
+      
+      // Save the job state to persist it
+      await _jobService.addJob(job);
     });
   }
 
   // Assign a new batch of nonces to a worker that has completed its previous batch
   void _assignNextBatch(String jobId, int workerId) {
-    if (!_jobWorkers.containsKey(jobId)) return;
-    
-    final workerIndex = _jobWorkers[jobId]!.indexWhere((w) => w.id == workerId);
-    if (workerIndex < 0) return;
-    
-    final worker = _jobWorkers[jobId]![workerIndex];
-    final job = _activeJobs[jobId];
-    if (job == null) return;
-    
-    // Find the highest nonce processed by any worker
-    final highestNonce = _jobWorkers[jobId]!.fold(
-      job.startNonce, 
-      (max, w) => w.lastProcessedNonce > max ? w.lastProcessedNonce : max
-    );
-    
-    // Calculate a new batch for this worker
-    final batchSize = (_baseBatchSize * (_speedMultipliers[jobId] ?? 1.0)).round();
-    final newBatchStart = highestNonce + 1;
-    final newBatchEnd = job.endNonce > 0 && newBatchStart + batchSize > job.endNonce 
-        ? job.endNonce 
-        : newBatchStart + batchSize;
-    
-    // If we've reached the end nonce, mark this worker as inactive
-    if (job.endNonce > 0 && newBatchStart >= job.endNonce) {
-      _jobWorkers[jobId]![workerIndex] = worker.copyWith(isActive: false);
+    if (!_activeJobs.containsKey(jobId) || !_jobWorkers.containsKey(jobId)) {
+      debugPrint('Job $jobId not found when trying to assign new batch to worker $workerId');
       return;
     }
     
-    // Update the worker with the new batch
+    final job = _activeJobs[jobId]!;
+    
+    // If the job is completed, don't assign a new batch
+    if (job.completed) {
+      debugPrint('Job $jobId is already completed, not assigning new batch to worker $workerId');
+      return;
+    }
+    
+    // If the job is paused, don't assign a new batch
+    if (_pausedJobs.containsKey(jobId)) {
+      debugPrint('Job $jobId is paused, not assigning new batch to worker $workerId');
+      return;
+    }
+    
+    // Find the worker
+    final workerIndex = _jobWorkers[jobId]!.indexWhere((w) => w.id == workerId);
+    if (workerIndex < 0) {
+      debugPrint('Worker $workerId not found for job $jobId');
+      return;
+    }
+    
+    final worker = _jobWorkers[jobId]![workerIndex];
+    
+    // Update the job's last tried nonce to track progress
+    if (worker.lastProcessedNonce > job.lastTriedNonce) {
+      _activeJobs[jobId] = job.copyWith(
+        lastTriedNonce: worker.lastProcessedNonce
+      );
+    }
+    
+    // Calculate the total number of workers and the worker's assigned range
+    final workerCount = _maxConcurrentJobs; 
+    final totalRange = job.endNonce - job.startNonce;
+    final workerRangeSize = totalRange ~/ workerCount;
+    
+    // Calculate this worker's original assigned range
+    final workerStartNonce = job.startNonce + (workerId * workerRangeSize);
+    final workerEndNonce = workerId == workerCount - 1 
+        ? job.endNonce 
+        : job.startNonce + ((workerId + 1) * workerRangeSize) - 1;
+    
+    // Find the next available nonce range within this worker's assigned range
+    // Start from the worker's last processed nonce + 1, but never below the worker's start nonce
+    int newStart = max(worker.lastProcessedNonce + 1, workerStartNonce);
+    
+    // If the new start is beyond the worker's end nonce, the worker has completed its range
+    if (newStart > workerEndNonce) {
+      debugPrint('Worker $workerId has completed its assigned range for job $jobId');
+      
+      // Mark the worker as inactive
+      _jobWorkers[jobId]![workerIndex] = worker.copyWith(
+        status: 'completed',
+        isActive: false,
+      );
+      
+      // Check if all workers have completed their ranges
+      bool allWorkersCompleted = true;
+      for (final w in _jobWorkers[jobId]!) {
+        if (w.isActive || w.status == 'mining') {
+          allWorkersCompleted = false;
+          break;
+        }
+      }
+      
+      // If all workers have completed their ranges, mark the job as complete
+      if (allWorkersCompleted) {
+        debugPrint('All workers have completed their ranges for job $jobId');
+        _activeJobs[jobId] = job.copyWith(
+          completed: true,
+          successful: false,
+        );
+      }
+      
+      return;
+    }
+    
+    // Calculate batch size (10,000 nonces per batch)
+    final batchSize = 10000;
+    
+    // Calculate the new batch end, ensuring it's greater than newStart
+    int newEnd = newStart + batchSize - 1; 
+    
+    // Make sure we don't exceed the worker's end nonce
+    if (newEnd > workerEndNonce) {
+      newEnd = workerEndNonce;
+    }
+    
+    // Double-check that the range is valid
+    if (newEnd <= newStart) {
+      debugPrint('Invalid range calculated: $newStart to $newEnd for job $jobId');
+      return;
+    }
+    
+    debugPrint('Assigned new batch to worker $workerId for job $jobId: $newStart to $newEnd (within worker range: $workerStartNonce to $workerEndNonce)');
+    
+    // Update the worker
     _jobWorkers[jobId]![workerIndex] = worker.copyWith(
-      currentBatchStart: newBatchStart,
-      currentBatchEnd: newBatchEnd,
-      lastProcessedNonce: newBatchStart,
+      currentBatchStart: newStart,
+      currentBatchEnd: newEnd,
+      lastProcessedNonce: newStart - 1, 
+      status: 'mining',
+      isActive: true,
+    );
+    
+    // Update job's worker nonce state
+    Map<int, int> updatedWorkerNonces = Map.from(job.workerLastNonces);
+    updatedWorkerNonces[workerId] = newStart - 1;
+    _activeJobs[jobId] = job.copyWith(
+      workerLastNonces: updatedWorkerNonces
     );
     
     // Send the new batch to the worker
-    worker.sendPort?.send({
-      'command': 'newBatch',
-      'startNonce': newBatchStart,
-      'endNonce': newBatchEnd,
-    });
+    if (_workerSendPorts.containsKey(jobId) && 
+        _workerSendPorts[jobId]!.containsKey(workerId) && 
+        _workerSendPorts[jobId]![workerId] != null) {
+      
+      _workerSendPorts[jobId]![workerId]!.send({
+        'command': 'newBatch', // Changed from 'processBatch' to 'newBatch' to match worker isolate code
+        'startNonce': newStart,
+        'endNonce': newEnd,
+        'speedMultiplier': _speedMultipliers[jobId] ?? 1.0,
+      });
+    } else {
+      debugPrint('No send port available for worker $workerId for job $jobId');
+    }
   }
 
   // Stop all workers for a job except the one that found the solution
-  void _stopAllWorkersExcept(String jobId, int exceptWorkerId) {
+  Future<void> _stopAllWorkersExcept(String jobId, int exceptWorkerId) async {
     if (!_jobWorkers.containsKey(jobId)) return;
     
-    debugPrint('Stopping all workers for job $jobId except worker $exceptWorkerId');
+    // Get all workers for the job
+    final workers = _jobWorkers[jobId]!;
     
-    // Use a synchronized lock to ensure all workers are stopped properly
-    _lock.synchronized(() {
-      // First send stop command to all workers
-      for (final worker in _jobWorkers[jobId]!) {
-        if (worker.id != exceptWorkerId) {
-          try {
-            worker.sendPort?.send({'command': 'stop'});
-            debugPrint('Sent stop command to worker ${worker.id} for job $jobId');
-          } catch (e) {
-            debugPrint('Error sending stop command to worker ${worker.id}: $e');
-          }
-        }
-      }
+    // Stop each worker except the one that found a solution
+    for (final worker in workers) {
+      if (worker.id == exceptWorkerId) continue;
       
-      // Then kill all isolates immediately
-      for (final worker in _jobWorkers[jobId]!) {
-        if (worker.id != exceptWorkerId) {
-          try {
-            worker.isolate?.kill(priority: Isolate.immediate);
-            debugPrint('Killed isolate for worker ${worker.id} for job $jobId');
-          } catch (e) {
-            debugPrint('Error killing isolate for worker ${worker.id}: $e');
-          }
-        }
-      }
-      
-      // Close all receive ports immediately
-      for (final worker in _jobWorkers[jobId]!) {
-        if (worker.id != exceptWorkerId) {
-          try {
-            worker.receivePort?.close();
-            debugPrint('Closed receive port for worker ${worker.id} for job $jobId');
-          } catch (e) {
-            debugPrint('Error closing receive port for worker ${worker.id}: $e');
-          }
-        }
-      }
-      
-      // Remove all workers except the one that found the solution
-      _jobWorkers[jobId]!.removeWhere((worker) => worker.id != exceptWorkerId);
-      
-      // Set remaining worker as inactive to prevent further processing
-      final remainingWorkerIndex = _jobWorkers[jobId]!.indexWhere((w) => w.id == exceptWorkerId);
-      if (remainingWorkerIndex >= 0) {
-        _jobWorkers[jobId]![remainingWorkerIndex] = _jobWorkers[jobId]![remainingWorkerIndex].copyWith(
+      // Mark the worker as inactive
+      final workerIndex = workers.indexWhere((w) => w.id == worker.id);
+      if (workerIndex >= 0) {
+        _jobWorkers[jobId]![workerIndex] = worker.copyWith(
+          status: 'stopped',
           isActive: false,
-          status: 'completed',
         );
-        debugPrint('Set worker $exceptWorkerId for job $jobId as completed');
       }
       
-      // Clean up other resources immediately
-      _receiveStreams[jobId]?.cancel();
-      _receiveStreams.remove(jobId);
-      _speedMultipliers.remove(jobId);
-      _hashRateHistory.remove(jobId);
-      _lastRemainingTimes.remove(jobId);
+      // Send stop command to the worker
+      if (_workerSendPorts.containsKey(jobId) && 
+          _workerSendPorts[jobId]!.containsKey(worker.id) && 
+          _workerSendPorts[jobId]![worker.id] != null) {
+        
+        _workerSendPorts[jobId]![worker.id]!.send({
+          'command': 'stop',
+        });
+      }
       
-      debugPrint('All workers for job $jobId have been stopped except worker $exceptWorkerId');
-    });
-  }
-
-  // Simple toggle pause that ensures the state is synchronized
-  // Returns true if successful, false if the job was not found
-  Future<bool> togglePause(String jobId) async {
-    // Debug all active jobs and isolates
-    debugPrint('Active isolates: ${_jobWorkers.keys.join(', ')}');
-    debugPrint('Active jobs: ${_activeJobs.keys.join(', ')}');
-    
-    if (!_jobWorkers.containsKey(jobId)) {
-      debugPrint('Cannot toggle pause: Mining job not found: $jobId');
-      return false;
+      // Kill the isolate
+      if (_workerIsolates.containsKey(jobId) && 
+          _workerIsolates[jobId]!.containsKey(worker.id)) {
+        
+        _workerIsolates[jobId]![worker.id]!.kill(priority: Isolate.immediate);
+      }
+      
+      // Close the receive port
+      if (_workerPorts.containsKey(jobId) && 
+          _workerPorts[jobId]!.containsKey(worker.id)) {
+        
+        _workerPorts[jobId]![worker.id]!.close();
+      }
     }
     
+    // Mark the solution worker as completed
+    final solutionWorkerIndex = workers.indexWhere((w) => w.id == exceptWorkerId);
+    if (solutionWorkerIndex >= 0) {
+      _jobWorkers[jobId]![solutionWorkerIndex] = workers[solutionWorkerIndex].copyWith(
+        status: 'solution',
+        isActive: false,
+      );
+    }
+    
+    // Update job stats
+    _updateJobStats(jobId);
+    
+    // Broadcast job update
+    _broadcastJobUpdate(jobId);
+  }
+
+  // Toggle mining job pause state
+  Future<bool> togglePause(String jobId) async {
+    await _lock.synchronized(() async {
+      if (!_activeJobs.containsKey(jobId)) {
+        debugPrint('Cannot toggle pause: Job $jobId not found');
+        return false;
+      }
+      
+      final workers = _jobWorkers[jobId];
+      if (workers == null || workers.isEmpty) {
+        debugPrint('Cannot toggle pause: No workers for job $jobId');
+        return false;
+      }
+    });
+    
     // Toggle the pause state
-    final wasPaused = _pausedJobs[jobId] ?? false;
+    final wasPaused = _pausedJobs[jobId] != null; // Corrected condition
     final newState = !wasPaused;
-    _pausedJobs[jobId] = newState;
+    if (newState) {
+      final activeJob = _activeJobs[jobId];
+      if (activeJob != null) {
+        _pausedJobs[jobId] = activeJob; // Only assign if not null
+      }
+    } else {
+      _pausedJobs.remove(jobId);
+    }
     
     // Send the new state to the isolate
     debugPrint('Toggling pause state to: ${newState ? 'PAUSED' : 'RUNNING'} for job: $jobId');
-    _jobWorkers[jobId]!.forEach((worker) {
-      worker.sendPort?.send({'command': newState ? 'pause' : 'resume'});
-    });
+    _sendCommandToWorkers(jobId, newState ? 'pause' : 'resume');
     
     return true;
   }
@@ -394,32 +482,27 @@ class MiningService {
   void stopMining(String jobId) {
     final workers = _jobWorkers[jobId];
     final job = _activeJobs[jobId];
-    final isPaused = _pausedJobs[jobId] ?? false;
+    final isPaused = _pausedJobs[jobId] != null; // Corrected condition
 
     if (workers != null) {
       debugPrint('Stopping mining job: $jobId (isPaused: $isPaused)');
       
       // Stop all workers
       workers.forEach((worker) {
-        worker.sendPort?.send({'command': 'stop'});
+        _workerSendPorts[jobId]![worker.id]?.send({'command': 'stop'});
         worker.isolate?.kill(priority: Isolate.immediate);
         worker.receivePort?.close();
       });
       
       // Clean up worker resources
-      _jobWorkers.remove(jobId);
-      _speedMultipliers.remove(jobId);
-      _receiveStreams[jobId]?.cancel();
-      _receiveStreams.remove(jobId);
-      _hashRateHistory.remove(jobId);
-      _lastRemainingTimes.remove(jobId);
+      _cleanupJob(jobId);
       
       // If the job is paused, we don't want to mark it as completed
       // Instead, we just save its current state so it can be resumed later
       if (isPaused && job != null) {
         debugPrint('Job $jobId is paused, saving state without marking as completed');
         
-        // Save the job state but don't mark it as completed
+        // Save the job state but don't mark as completed
         _lock.synchronized(() async {
           try {
             final storedJob = await _jobService.getJob(jobId);
@@ -428,6 +511,7 @@ class MiningService {
               final updatedJob = storedJob.copyWith(
                 lastTriedNonce: job.lastTriedNonce,
               );
+              
               await _jobService.updateJob(updatedJob);
               debugPrint('Saved paused state for job $jobId at nonce ${job.lastTriedNonce}');
             }
@@ -460,7 +544,7 @@ class MiningService {
     // Only send command if we have an active send port
     if (_jobWorkers.containsKey(jobId)) {
       _jobWorkers[jobId]!.forEach((worker) {
-        worker.sendPort?.send({'command': 'speed', 'value': multiplier});
+        _workerSendPorts[jobId]![worker.id]?.send({'command': 'speed', 'value': multiplier});
       });
     }
   }
@@ -478,26 +562,21 @@ class MiningService {
     required int startNonce,
     required int endNonce,
     required Function(Map<String, dynamic>) onUpdate,
-    required Function(Map<String, dynamic>) onSolution,
   }) async {
-    // Create a receive port for the worker
+    // Create a receive port for communication with the worker
     final receivePort = ReceivePort();
     
-    // Create the worker
-    final worker = MiningWorker(
-      id: workerId,
-      jobId: jobId,
-      lastProcessedNonce: startNonce,
-      currentBatchStart: startNonce,
-      currentBatchEnd: endNonce,
-      receivePort: receivePort,
-      status: 'initializing',
-    );
+    // Store the receive port
+    _workerPorts[jobId] ??= {};
+    _workerPorts[jobId]![workerId] = receivePort;
     
-    // Add the worker to the job's worker list
-    _jobWorkers[jobId]!.add(worker);
+    // Initialize the send port map
+    _workerSendPorts[jobId] ??= {};
     
-    // Start the worker isolate
+    // Initialize the receive streams map
+    _receiveStreams[jobId] ??= [];
+    
+    // Create the worker isolate
     final isolate = await Isolate.spawn(
       _workerIsolate,
       {
@@ -512,595 +591,535 @@ class MiningService {
         'difficulty': difficulty,
         'startNonce': startNonce,
         'endNonce': endNonce,
-        'startPaused': _pausedJobs[jobId] ?? false,
-        'speedMultiplier': _speedMultipliers[jobId] ?? 1.0,
       },
     );
     
-    // Update the worker with the isolate
-    final workerIndex = _jobWorkers[jobId]!.indexWhere((w) => w.id == workerId);
-    if (workerIndex >= 0) {
-      _jobWorkers[jobId]![workerIndex] = worker.copyWith(
-        isolate: isolate,
-        isActive: true,
-      );
-    }
+    // Store the isolate
+    _workerIsolates[jobId] ??= {};
+    _workerIsolates[jobId]![workerId] = isolate;
     
     // Listen for messages from the worker
-    receivePort.listen((message) {
-      if (message is Map<String, dynamic>) {
-        // Handle worker initialization
-        if (message.containsKey('status') && message['status'] == 'initialized') {
-          final sendPort = message['port'] as SendPort;
-          final workerIndex = _jobWorkers[jobId]!.indexWhere((w) => w.id == workerId);
-          if (workerIndex >= 0) {
-            _jobWorkers[jobId]![workerIndex] = _jobWorkers[jobId]![workerIndex].copyWith(
-              sendPort: sendPort,
-              status: 'running',
-            );
-          }
-        }
-        // Handle worker updates
-        else if (message.containsKey('status')) {
-          // Pass to the update handler
-          onUpdate(message);
-          
-          // Update worker status
-          final workerIndex = _jobWorkers[jobId]!.indexWhere((w) => w.id == workerId);
-          if (workerIndex >= 0) {
-            _jobWorkers[jobId]![workerIndex] = _jobWorkers[jobId]![workerIndex].copyWith(
-              lastProcessedNonce: message['currentNonce'] as int,
-              status: message['status'] as String,
-            );
-          }
-          
-          // Handle solution found
-          if (message['status'] == 'found') {
-            onSolution(message);
-          }
-        }
+    SendPort? workerSendPort;
+    
+    final subscription = receivePort.listen((message) {
+      if (message is Map<String, dynamic> && message.containsKey('port')) {
+        // Store the worker's send port
+        workerSendPort = message['port'] as SendPort;
+        _workerSendPorts[jobId]![workerId] = workerSendPort;
+        
+        // Send initial command to start mining now that we have the send port
+        workerSendPort?.send({
+          'command': 'newBatch', 
+          'startNonce': startNonce,
+          'endNonce': endNonce,
+          'speedMultiplier': _speedMultipliers[jobId] ?? 1.0,
+        });
+        
+        return;
       }
+      
+      // Forward the message to the update handler
+      onUpdate(message as Map<String, dynamic>);
     });
     
-    debugPrint('Created worker $workerId for job $jobId');
-    debugPrint('  Nonce range: $startNonce to $endNonce');
+    // Store the subscription
+    _receiveStreams[jobId]!.add(subscription);
   }
   
   // Handle worker update
-  void _handleWorkerUpdate(Map<String, dynamic> update, String jobId, Function(Map<String, dynamic>) onUpdate) {
-    // Update the worker's status
+  void _handleWorkerUpdate(Map<String, dynamic> update) {
     final workerId = update['workerId'] as int;
-    final workerIndex = _jobWorkers[jobId]?.indexWhere((w) => w.id == workerId) ?? -1;
+    final jobId = update['jobId'] as String;
+    final status = update['status'] as String;
     
-    if (workerIndex >= 0) {
-      final worker = _jobWorkers[jobId]![workerIndex];
-      _jobWorkers[jobId]![workerIndex] = worker.copyWith(
-        lastProcessedNonce: update['currentNonce'] as int,
-        status: update['status'] as String,
-      );
-      
-      // Update the job's last tried nonce if this is the highest
-      if (update['currentNonce'] > (_activeJobs[jobId]?.lastTriedNonce ?? 0)) {
-        final updatedJob = _activeJobs[jobId]?.copyWith(
-          lastTriedNonce: update['currentNonce'] as int,
+    // Check if the job exists
+    if (!_activeJobs.containsKey(jobId)) {
+      debugPrint('Job $jobId not found for worker update');
+      return;
+    }
+    
+    // Check if the worker exists
+    if (!_jobWorkers.containsKey(jobId)) {
+      debugPrint('No workers found for job $jobId');
+      return;
+    }
+    
+    // Find the worker
+    final workerIndex = _jobWorkers[jobId]!.indexWhere((w) => w.id == workerId);
+    if (workerIndex < 0) {
+      debugPrint('Worker $workerId not found for job $jobId');
+      return;
+    }
+    
+    final worker = _jobWorkers[jobId]![workerIndex];
+    final job = _activeJobs[jobId]!;
+    
+    // Handle the update based on status
+    switch (status) {
+      case 'initializing':
+        // Worker is initializing
+        _jobWorkers[jobId]![workerIndex] = worker.copyWith(
+          status: 'initializing',
+          isActive: true,
+        );
+        break;
+        
+      case 'ready':
+        // Worker is ready
+        _jobWorkers[jobId]![workerIndex] = worker.copyWith(
+          status: 'ready',
+          isActive: true,
+        );
+        break;
+        
+      case 'mining':
+        // Worker is actively mining
+        _jobWorkers[jobId]![workerIndex] = worker.copyWith(
+          status: 'mining',
+          isActive: true,
+        );
+        break;
+        
+      case 'paused':
+        // Worker is paused
+        _jobWorkers[jobId]![workerIndex] = worker.copyWith(
+          status: 'paused',
+          isActive: false,
+        );
+        break;
+        
+      case 'progress':
+        // Worker is reporting progress
+        final lastProcessedNonce = update['lastProcessedNonce'] as int;
+        final hashesProcessed = update['hashesProcessed'] as int;
+        
+        // Calculate hash rate (hashes per second)
+        final hashRate = hashesProcessed.toDouble();
+        
+        // Update worker
+        _jobWorkers[jobId]![workerIndex] = worker.copyWith(
+          status: 'mining',
+          isActive: true,
+          lastProcessedNonce: lastProcessedNonce,
+          hashRate: hashRate,
         );
         
-        if (updatedJob != null) {
-          _activeJobs[jobId] = updatedJob;
-        }
+        // Update job's worker nonce state
+        Map<int, int> updatedWorkerNonces = Map.from(job.workerLastNonces);
+        updatedWorkerNonces[workerId] = lastProcessedNonce;
+        _activeJobs[jobId] = job.copyWith(
+          workerLastNonces: updatedWorkerNonces
+        );
+        
+        // Update job stats
+        _updateJobStats(jobId);
+        
+        // Broadcast job update
+        _broadcastJobUpdate(jobId);
+        break;
+        
+      case 'batchComplete':
+        // Worker has completed its batch
+        final lastProcessedNonce = update['lastProcessedNonce'] as int;
+        
+        // Update worker
+        _jobWorkers[jobId]![workerIndex] = worker.copyWith(
+          status: 'completed',
+          isActive: false,
+          lastProcessedNonce: lastProcessedNonce,
+        );
+        
+        // Update job's worker nonce state
+        Map<int, int> updatedWorkerNonces = Map.from(job.workerLastNonces);
+        updatedWorkerNonces[workerId] = lastProcessedNonce;
+        _activeJobs[jobId] = job.copyWith(
+          workerLastNonces: updatedWorkerNonces
+        );
+        
+        // Update job stats
+        _updateJobStats(jobId);
+        
+        // Broadcast job update
+        _broadcastJobUpdate(jobId);
+        
+        // Assign a new batch to the worker
+        _assignNextBatch(jobId, workerId);
+        break;
+        
+      case 'solutionFound':
+        // Worker has found a solution
+        final nonce = update['nonce'] as int;
+        final hash = update['hash'] as String;
+        
+        // Update worker status to solution
+        _jobWorkers[jobId]![workerIndex] = worker.copyWith(
+          status: 'solution',
+          isActive: false,
+          lastProcessedNonce: nonce,
+        );
+        
+        // Stop all other workers
+        _stopAllWorkersExcept(jobId, workerId);
+        
+        // Handle the solution (this will broadcast the ticket)
+        _handleSolution(update, jobId, job, (solutionUpdate) {
+          // This callback will be called after the solution is handled
+          debugPrint('Solution handled for job $jobId');
+        });
+        
+        break;
+    }
+  }
+
+  void _updateJobStats(String jobId) {
+    if (!_activeJobs.containsKey(jobId) || !_jobWorkers.containsKey(jobId)) {
+      return;
+    }
+    
+    // Get job and workers
+    final job = _activeJobs[jobId]!;
+    final workers = _jobWorkers[jobId]!;
+    
+    // Calculate total hash rate
+    double totalHashRate = 0.0;
+    int activeWorkers = 0;
+    int currentNonce = job.startNonce;
+    
+    for (final worker in workers) {
+      if (worker.isActive) {
+        totalHashRate += worker.hashRate;
+        activeWorkers++;
+        currentNonce = max(currentNonce, worker.lastProcessedNonce);
       }
     }
     
-    // Forward the update to the UI
-    onUpdate({
-      'jobId': jobId,
-      'status': update['status'],
-      ..._calculateAggregateStats(jobId),
-      'isPaused': _pausedJobs[jobId] ?? false,
-    });
-  }
-  
-  // Handle solution found
-  void _handleSolution(Map<String, dynamic> solution, String jobId, MiningJob job, Function(Map<String, dynamic>) onUpdate) {
-    // Get solution details
-    final nonce = solution['solution']['nonce'] as int;
-    final hash = solution['solution']['hash'] as String;
+    // Calculate progress
+    final totalNonces = job.endNonce - job.startNonce;
+    final processedNonces = currentNonce - job.startNonce;
+    final progress = totalNonces > 0 ? processedNonces / totalNonces : 0.0;
     
-    debugPrint('Solution found for job $jobId with nonce $nonce and hash $hash');
+    // Get hash rate history
+    _hashRateHistory[jobId] ??= [];
     
-    // Immediately stop all workers for this job
-    _stopAllWorkersExcept(jobId, solution['workerId'] as int);
-    
-    // Immediately remove job from active jobs to prevent further processing
-    _activeJobs.remove(jobId);
-    _pausedJobs.remove(jobId);
-    
-    // Immediately notify UI about the solution
-    onUpdate({
-      'jobId': jobId,
-      'status': 'found',
-      'solution': {
-        'nonce': nonce,
-        'hash': hash,
-      },
-      'isPaused': false,
-    });
-    
-    // Use a synchronized lock to ensure job update is completed before any other operations
-    _lock.synchronized(() async {
-      try {
-        // Update job in storage
-        final storedJob = await _jobService.getJob(jobId);
-        if (storedJob != null) {
-          final updatedJob = MiningJob(
-            id: storedJob.id,
-            content: storedJob.content,
-            leader: storedJob.leader,
-            owner: storedJob.owner,
-            height: storedJob.height,
-            rewardType: storedJob.rewardType, // Keep as string '0' or '1'
-            difficulty: storedJob.difficulty,
-            startNonce: storedJob.startNonce,
-            endNonce: storedJob.endNonce,
-            startTime: storedJob.startTime,
-            endTime: DateTime.now(),
-            foundNonce: nonce,
-            foundHash: hash,
-            completed: true,
-            successful: true,
-            error: storedJob.error,
-            broadcastSuccessful: storedJob.broadcastSuccessful,
-            broadcastError: storedJob.broadcastError,
-            broadcastHash: storedJob.broadcastHash,
-            lastTriedNonce: nonce,
-          );
-          
-          // Update in storage
-          await _jobService.updateJob(updatedJob);
-          debugPrint('Job $jobId marked as completed in storage');
-        }
-      } catch (e) {
-        debugPrint('Error updating job $jobId in storage: $e');
-      }
-    });
-    
-    // Convert rewardType from string to int for HashUtils per memory requirement
-    final ticket = HashUtils.ticketToHex(
-      job.content,
-      job.leader,
-      job.height,
-      job.owner,
-      int.parse(job.rewardType), // Convert string to int for HashUtils
-      DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      nonce,
+    // Calculate remaining time
+    final remainingTime = _calculateStableRemainingTime(
+      currentNonce,
+      job.startNonce,
+      job.endNonce,
+      processedNonces,
+      job.startTime,
+      _hashRateHistory[jobId]!,
     );
     
-    // Broadcast the ticket
-    _nodeService.broadcastRawSupportTicket(ticket);
-  }
-  
-  // Mark a job as completed
-  void _completeJob(String jobId, bool successful, int? foundNonce, String? foundHash, Function(Map<String, dynamic>) onUpdate) {
-    // Get the job from storage
-    _jobService.getJob(jobId).then((storedJob) async {
-      if (storedJob != null) {
-        // Create updated job
-        final updatedJob = MiningJob(
-          id: storedJob.id,
-          content: storedJob.content,
-          leader: storedJob.leader,
-          owner: storedJob.owner,
-          height: storedJob.height,
-          rewardType: storedJob.rewardType, // Keep as string '0' or '1'
-          difficulty: storedJob.difficulty,
-          startNonce: storedJob.startNonce,
-          endNonce: storedJob.endNonce,
-          startTime: storedJob.startTime,
-          endTime: DateTime.now(),
-          foundNonce: foundNonce,
-          foundHash: foundHash,
-          completed: true,
-          successful: successful,
-          error: storedJob.error,
-          broadcastSuccessful: storedJob.broadcastSuccessful,
-          broadcastError: storedJob.broadcastError,
-          broadcastHash: storedJob.broadcastHash,
-          lastTriedNonce: foundNonce ?? storedJob.lastTriedNonce,
-        );
-        
-        // Update in storage
-        await _jobService.updateJob(updatedJob);
-        
-        // Remove from active jobs
-        _activeJobs.remove(jobId);
-        
-        // Notify UI
-        onUpdate({
-          'jobId': jobId,
-          'status': successful ? 'found' : 'completed',
-          'solution': successful ? {
-            'nonce': foundNonce,
-            'hash': foundHash,
-          } : null,
-        });
-      }
-    });
+    // Store last remaining time
+    _lastRemainingTimes[jobId] = remainingTime;
+    
+    // Update job stats
+    _jobStats[jobId] = {
+      'progress': progress,
+      'hashRate': totalHashRate,
+      'remainingTime': remainingTime,
+      'activeWorkers': activeWorkers,
+      'currentNonce': currentNonce,
+    };
+    
+    // Broadcast job update
+    _broadcastJobUpdate(jobId);
   }
 
-  // Worker isolate function
-  static void _workerIsolate(Map<String, dynamic> params) {
-    final sendPort = params['sendPort'] as SendPort;
-    final workerId = params['workerId'] as int;
-    final jobId = params['jobId'] as String;
-    final content = params['content'] as String;
-    final leader = params['leader'] as String;
-    final height = params['height'] as int;
-    final owner = params['owner'] as String;
-    final rewardType = params['rewardType'] as String; // Keep as string '0' or '1' per memory requirement
-    final difficulty = params['difficulty'] as int;
-    int startNonce = params['startNonce'] as int;
-    final endNonce = params['endNonce'] as int;
-    bool isPaused = params['startPaused'] as bool;
-    double speedMultiplier = params['speedMultiplier'] as double;
+  // Handle solution found
+  void _handleSolution(Map<String, dynamic> update, String jobId, MiningJob job, Function(Map<String, dynamic>) callback) {
+    final workerId = update['workerId'] as int;
+    final nonce = update['nonce'] as int;
+    final hash = update['hash'] as String;
     
-    int currentNonce = startNonce;
-    int hashesChecked = 0;
-    bool shouldStop = false;
-    final startTime = DateTime.now();
+    // Update job's worker nonce state
+    Map<int, int> updatedWorkerNonces = Map.from(job.workerLastNonces);
+    updatedWorkerNonces[workerId] = nonce;
     
-    // For stable reporting
-    final List<double> hashRateHistory = [];
-    double lastReportedProgress = 0.0;
-    double lastReportedHashRate = 0.0;
-    double lastReportedRemainingTime = 0.0;
-    DateTime lastReportTime = DateTime.now();
+    // Update the job with the solution
+    final updatedJob = job.copyWith(
+      completed: true,
+      successful: true,
+      endTime: DateTime.now(),
+      foundNonce: nonce,
+      foundHash: hash,
+      workerLastNonces: updatedWorkerNonces
+    );
     
-    // Create a receive port for communication from the main isolate
-    final receivePort = ReceivePort();
+    _activeJobs[jobId] = updatedJob;
     
-    // Send the receive port to the main isolate
-    sendPort.send({
-      'workerId': workerId,
-      'jobId': jobId,
-      'port': receivePort.sendPort,
-      'status': 'initialized',
+    // Move to completed jobs
+    _completedJobs[jobId] = updatedJob;
+    
+    // Save the job to persistent storage
+    _jobService.updateJob(updatedJob).then((_) {
+      debugPrint('Solution found for job $jobId saved to persistent storage');
+    }).catchError((error) {
+      debugPrint('Error saving solution for job $jobId to persistent storage: $error');
     });
     
-    // Listen for commands from the main isolate
-    receivePort.listen((message) {
-      if (message is Map<String, dynamic>) {
-        final command = message['command'] as String?;
-        
-        if (command == 'stop') {
-          shouldStop = true;
-          receivePort.close();
-        } else if (command == 'pause') {
-          isPaused = true;
-          
-          // Send paused status update
-          sendPort.send({
-            'workerId': workerId,
-            'jobId': jobId,
-            'status': 'paused',
-            'progress': _calculateProgress(currentNonce, startNonce, endNonce) * 100.0, // Convert to percentage
-            'hashRate': _calculateStableHashRate(hashesChecked, startTime, hashRateHistory),
-            'remainingTime': _calculateStableRemainingTime(
-              currentNonce, startNonce, endNonce, hashesChecked, startTime, hashRateHistory),
-            'isPaused': true,
-            'currentNonce': currentNonce,
-          });
-        } else if (command == 'resume') {
-          isPaused = false;
-          
-          // Send resumed status update
-          sendPort.send({
-            'workerId': workerId,
-            'jobId': jobId,
-            'status': 'running',
-            'progress': _calculateProgress(currentNonce, startNonce, endNonce) * 100.0, // Convert to percentage
-            'hashRate': _calculateStableHashRate(hashesChecked, startTime, hashRateHistory),
-            'remainingTime': _calculateStableRemainingTime(
-              currentNonce, startNonce, endNonce, hashesChecked, startTime, hashRateHistory),
-            'isPaused': false,
-            'currentNonce': currentNonce,
-          });
-        } else if (command == 'setSpeed') {
-          final newSpeedMultiplier = message['speed'] as double;
-          speedMultiplier = newSpeedMultiplier;
-        } else if (command == 'newBatch') {
-          final newStartNonce = message['startNonce'] as int;
-          final newEndNonce = message['endNonce'] as int;
-          currentNonce = newStartNonce;
-          startNonce = newStartNonce;
-          hashesChecked = 0;
-          sendPort.send({
-            'workerId': workerId,
-            'jobId': jobId,
-            'status': 'running',
-            'progress': 0.0,
-            'hashRate': 0.0,
-            'remainingTime': 0.0,
-            'isPaused': isPaused,
-            'currentNonce': currentNonce,
-          });
-        }
-      }
-    });
-
-    // Mining loop
-    Timer.periodic(const Duration(milliseconds: 100), (timer) async {
-      if (shouldStop) {
-        timer.cancel();
-        receivePort.close();
-        return;
-      }
-
-      if (isPaused) {
-        // Skip processing while paused, but continue sending status updates
-        // Only send updates every second to avoid UI jitter
-        final now = DateTime.now();
-        if (now.difference(lastReportTime).inMilliseconds >= 1000) {
-          lastReportTime = now;
-          sendPort.send({
-            'workerId': workerId,
-            'jobId': jobId,
-            'status': 'running',
-            'progress': _calculateProgress(currentNonce, startNonce, endNonce) * 100.0, // Convert to percentage
-            'hashRate': _calculateStableHashRate(hashesChecked, startTime, hashRateHistory),
-            'remainingTime': _calculateStableRemainingTime(
-              currentNonce, startNonce, endNonce, hashesChecked, startTime, hashRateHistory),
-            'isPaused': true,
-            'currentNonce': currentNonce,
-          });
-        }
-        return;
-      }
-
-      // Process a batch of nonces
-      // Adjust batch size based on speed multiplier
-      final int batchSize = (_baseBatchSize * speedMultiplier).round().clamp(_minBatchSize, _baseBatchSize);
+    // Save the job state
+    saveJobState();
+    
+    // Broadcast the ticket to the node
+    _broadcastTicket(jobId, updatedJob, nonce).then((_) {
+      debugPrint('Ticket for job $jobId broadcast successfully');
       
-      for (int i = 0; i < batchSize; i++) {
-        if (shouldStop || isPaused) break;
-
-        // Check if we've reached the end nonce
-        if (endNonce != -1 && currentNonce > endNonce) {
-          timer.cancel();
-          receivePort.close();
-          
-          // Send completed status
-          sendPort.send({
-            'workerId': workerId,
-            'jobId': jobId,
-            'status': 'completed',
-            'progress': 100.0, // Convert to percentage
-            'hashRate': _calculateStableHashRate(hashesChecked, startTime, hashRateHistory),
-            'remainingTime': 0.0,
-            'currentNonce': currentNonce,
-            'isPaused': false,
-          });
-          return;
-        }
-
-        // Try to create a ticket with the current nonce
-        try {
-          final rewardTypeInt = int.parse(rewardType); // Convert string to int for HashUtils
-          final hash = HashUtils.createTicket(
-            content,
-            leader,
-            height,
-            owner,
-            rewardTypeInt, // Pass as int to HashUtils per memory requirement
-            DateTime.now().millisecondsSinceEpoch ~/ 1000,
-            currentNonce,
-          );
-
-          // Check if the hash meets the difficulty requirement
-          final targetPrefix = '0' * difficulty;
-          final found = hash.startsWith(targetPrefix);
-
-          if (found) {
-            // Solution found - immediately stop and report
-            timer.cancel();
-            
-            // Send solution found message
-            sendPort.send({
-              'workerId': workerId,
-              'jobId': jobId,
-              'status': 'found',
-              'solution': {
-                'nonce': currentNonce,
-                'hash': hash,
-              },
-              'isPaused': false,
-              'currentNonce': currentNonce,
-            });
-            
-            // Close the receive port and exit immediately
-            receivePort.close();
-            return;
-          }
-
-          // Increment nonce and hashes checked
-          currentNonce++;
-          hashesChecked++;
-        } catch (e) {
-          // Log error but continue with next nonce
-          print('Error processing nonce $currentNonce: $e');
-          currentNonce++;
-        }
+      // Update job stats - only if the job is still in active jobs
+      if (_activeJobs.containsKey(jobId)) {
+        _updateJobStats(jobId);
       }
-
-      // Send status update (but limit updates to reduce UI jitter)
-      final now = DateTime.now();
-      final progress = _calculateProgress(currentNonce, startNonce, endNonce) * 100.0; // Convert to percentage
-      final hashRate = _calculateStableHashRate(hashesChecked, startTime, hashRateHistory);
-      final remainingTime = _calculateStableRemainingTime(
-        currentNonce, startNonce, endNonce, hashesChecked, startTime, hashRateHistory);
-        
-      // Only send updates if:
-      // 1. It's been at least 1 second since the last update, or
-      // 2. Progress has changed by at least 0.5%, or
-      // 3. Hash rate has changed by at least 5%, or
-      // 4. Remaining time has changed by at least 5%
-      final timeDiff = now.difference(lastReportTime).inMilliseconds;
-      final progressDiff = (progress - lastReportedProgress).abs();
-      final hashRateDiff = lastReportedHashRate > 0 
-          ? ((hashRate - lastReportedHashRate) / lastReportedHashRate).abs() 
-          : 1.0;
-      final remainingTimeDiff = lastReportedRemainingTime > 0 
-          ? ((remainingTime - lastReportedRemainingTime) / lastReportedRemainingTime).abs() 
-          : 1.0;
-          
-      if (timeDiff >= 1000 || progressDiff >= 0.5 || hashRateDiff >= 0.05 || remainingTimeDiff >= 0.05) {
-        lastReportTime = now;
-        lastReportedProgress = progress;
-        lastReportedHashRate = hashRate;
-        lastReportedRemainingTime = remainingTime;
-        
-        sendPort.send({
-          'workerId': workerId,
-          'jobId': jobId,
-          'status': 'running',
-          'progress': progress,
-          'hashRate': hashRate,
-          'remainingTime': remainingTime,
-          'isPaused': false,
-          'currentNonce': currentNonce,
-        });
-      }
-    });
-  }
-  
-  // Calculate stable hash rate with moving average
-  static double _calculateStableHashRate(int hashesChecked, DateTime startTime, List<double> history) {
-    final duration = DateTime.now().difference(startTime).inMilliseconds / 1000.0;
-    if (duration <= 0) return 0.0;
-    
-    final currentRate = hashesChecked / duration;
-    
-    // Add to history (limit to last 10 readings)
-    history.add(currentRate);
-    if (history.length > 10) {
-      history.removeAt(0);
-    }
-    
-    // Return moving average
-    return history.isNotEmpty ? history.reduce((a, b) => a + b) / history.length : 0.0;
-  }
-  
-  // Calculate stable remaining time with smoothing
-  static double _calculateStableRemainingTime(
-    int currentNonce, int startNonce, int endNonce, int hashesChecked, DateTime startTime, List<double> hashRateHistory) {
-    if (endNonce == -1) {
-      // If no end nonce is specified, we can't calculate remaining time
-      return 0.0;
-    }
-    
-    final hashRate = _calculateStableHashRate(hashesChecked, startTime, hashRateHistory);
-    if (hashRate <= 0) return 0.0;
-    
-    return (endNonce - currentNonce) / hashRate;
-  }
-
-  // Calculate aggregate statistics for all workers in a job
-  Map<String, dynamic> _calculateAggregateStats(String jobId) {
-    if (!_jobWorkers.containsKey(jobId) || _jobWorkers[jobId]!.isEmpty) {
-      return {
-        'progress': 0.0,
+      
+      // Notify listeners through the stream controller directly
+      // instead of using _broadcastJobUpdate which might fail if the job is removed
+      _jobUpdateController.add({
+        'jobId': jobId,
+        'progress': 100.0,
         'hashRate': 0.0,
         'remainingTime': 0.0,
-        'currentNonce': 0,
-        'activeWorkers': 0,
-      };
-    }
+        'currentNonce': nonce,
+        'workerDetails': _jobWorkers[jobId]?.map((worker) => {
+          'workerId': worker.id,
+          'lastNonce': worker.lastProcessedNonce,
+          'status': worker.status,
+          'hashRate': worker.hashRate,
+          'startNonce': worker.currentBatchStart,
+          'endNonce': worker.currentBatchEnd,
+          'isActive': worker.isActive,
+        }).toList() ?? [],
+        'isPaused': false,
+        'isCompleted': true,
+        'isSuccessful': true,
+      });
+      
+    }).catchError((error) {
+      debugPrint('Error broadcasting ticket for job $jobId: $error');
+      
+      // Even if broadcasting fails, update the UI directly
+      // instead of using _broadcastJobUpdate which might fail if the job is removed
+      _jobUpdateController.add({
+        'jobId': jobId,
+        'progress': 100.0,
+        'hashRate': 0.0,
+        'remainingTime': 0.0,
+        'currentNonce': nonce,
+        'workerDetails': _jobWorkers[jobId]?.map((worker) => {
+          'workerId': worker.id,
+          'lastNonce': worker.lastProcessedNonce,
+          'status': worker.status,
+          'hashRate': worker.hashRate,
+          'startNonce': worker.currentBatchStart,
+          'endNonce': worker.currentBatchEnd,
+          'isActive': worker.isActive,
+        }).toList() ?? [],
+        'isPaused': false,
+        'isCompleted': true,
+        'isSuccessful': true,
+        'broadcastError': error.toString(),
+      });
+    });
+    
+    // Notify listeners
+    _jobCompletedController.add({
+      'jobId': jobId,
+      'job': updatedJob.toJson(),
+      'nonce': nonce,
+      'hash': hash,
+    });
+    
+    // Call the callback
+    callback({
+      'jobId': jobId,
+      'job': updatedJob.toJson(),
+      'nonce': nonce,
+      'hash': hash,
+    });
+  }
 
+  // Complete a job (success or failure)
+  void _completeJob(String jobId, bool successful, int? foundNonce, String? foundHash, Function(Map<String, dynamic>) onUpdate) {
+    // Update job status
+    if (_activeJobs.containsKey(jobId)) {
+      final job = _activeJobs[jobId]!;
+      final updatedJob = job.copyWith(
+        completed: true,
+        successful: successful,
+        foundNonce: foundNonce,
+        foundHash: foundHash,
+        endTime: DateTime.now(), // Ensure we set the end time
+      );
+      
+      _activeJobs[jobId] = updatedJob;
+      
+      // Move to completed jobs
+      _completedJobs[jobId] = updatedJob;
+      _activeJobs.remove(jobId);
+      _pausedJobs.remove(jobId);
+      
+      // Save the job to persistent storage
+      _jobService.updateJob(updatedJob).then((_) {
+        debugPrint('Job $jobId saved to persistent storage');
+      }).catchError((error) {
+        debugPrint('Error saving job $jobId to persistent storage: $error');
+      });
+      
+      // Notify listeners
+      final status = successful ? 'found' : 'completed';
+      
+      // Notify through the job completed stream
+      _jobCompletedController.add({
+        'jobId': jobId,
+        'status': status,
+        'foundNonce': foundNonce,
+        'foundHash': foundHash,
+      });
+      
+      // Also notify through the callback for backward compatibility
+      onUpdate({
+        'jobId': jobId,
+        'status': status,
+        'foundNonce': foundNonce,
+        'foundHash': foundHash,
+      });
+    }
+  }
+
+  // Broadcast job updates to listeners
+  void _broadcastJobUpdates() {
+    // Update all active jobs
+    for (final jobId in _activeJobs.keys) {
+      final job = _activeJobs[jobId]!;
+      final workers = _jobWorkers[jobId] ?? [];
+      
+      // Calculate aggregate stats
+      double totalHashRate = 0.0;
+      int highestNonce = job.startNonce;
+      bool allWorkersCompleted = workers.isNotEmpty;
+      
+      for (final worker in workers) {
+        totalHashRate += worker.hashRate; 
+        if (worker.lastProcessedNonce > highestNonce) {
+          highestNonce = worker.lastProcessedNonce;
+        }
+        
+        // Check if any worker is still active
+        if (worker.isActive) {
+          allWorkersCompleted = false;
+        }
+      }
+      
+      // Calculate progress
+      final totalRange = job.endNonce - job.startNonce;
+      final progress = totalRange > 0 
+          ? ((highestNonce - job.startNonce) / totalRange * 100).clamp(0.0, 100.0) 
+          : 0.0;
+      
+      // Calculate remaining time
+      double remainingTime = 0.0;
+      if (totalHashRate > 0 && totalRange > 0) {
+        final remainingHashes = job.endNonce - highestNonce;
+        remainingTime = remainingHashes / (totalHashRate * 1000); // Convert to seconds
+      }
+      
+      // Check if job is completed
+      if (allWorkersCompleted && !job.completed) {
+        _activeJobs[jobId] = job.copyWith(
+          completed: true,
+          successful: false, // No solution found
+        );
+      }
+      
+      // Notify listeners through the stream controller
+      _jobUpdateController.add({
+        'jobId': jobId,
+        'progress': progress,
+        'hashRate': totalHashRate,
+        'remainingTime': remainingTime,
+        'currentNonce': highestNonce,
+        'workerDetails': workers.map((worker) => {
+          'workerId': worker.id,
+          'lastNonce': worker.lastProcessedNonce,
+          'status': worker.status,
+          'hashRate': worker.hashRate,
+          'startNonce': worker.currentBatchStart,
+          'endNonce': worker.currentBatchEnd,
+          'isActive': worker.isActive,
+        }).toList(),
+        'isPaused': _pausedJobs.containsKey(jobId),
+        'isCompleted': _activeJobs[jobId]!.completed,
+        'isSuccessful': _activeJobs[jobId]!.successful,
+      });
+    }
+  }
+
+  void _broadcastAllJobUpdates() {
+    for (final jobId in _activeJobs.keys) {
+      _broadcastJobUpdate(jobId);
+    }
+  }
+
+  void _broadcastJobUpdate(String jobId) {
+    // Check if the job exists in active jobs
     final job = _activeJobs[jobId];
     if (job == null) {
-      return {
-        'progress': 0.0,
-        'hashRate': 0.0,
-        'remainingTime': 0.0,
-        'currentNonce': 0,
-        'activeWorkers': _jobWorkers[jobId]!.length,
-      };
-    }
-
-    // Get the start and end nonce for the job
-    final startNonce = job.startNonce;
-    final endNonce = job.endNonce;
-
-    // Calculate total hashes processed across all workers
-    final totalProcessed = _jobWorkers[jobId]!.fold(0, (sum, w) => sum + w.hashesProcessed);
-    
-    // Calculate progress as a percentage (0-100)
-    double progress = 0.0;
-    if (endNonce > 0) {
-      final totalRange = endNonce - startNonce;
-      progress = totalRange > 0 ? (totalProcessed / totalRange) * 100.0 : 0.0;
-      // Clamp progress to 0-100 range
-      progress = progress.clamp(0.0, 100.0);
+      // Job might have been moved to completed jobs
+      debugPrint('Job $jobId not found in active jobs for broadcast update');
+      return;
     }
     
-    // Calculate aggregate hash rate (use a moving average for stability)
-    final totalHashRate = _jobWorkers[jobId]!
-        .where((w) => w.isActive && !w.isPaused)
-        .fold(0.0, (sum, w) => sum + w.getHashRate());
+    final workers = _jobWorkers[jobId] ?? [];
     
-    // Store hash rate history for this job (for moving average calculation)
-    if (!_hashRateHistory.containsKey(jobId)) {
-      _hashRateHistory[jobId] = [];
-    }
+    // Calculate aggregate stats
+    double totalHashRate = 0.0;
+    int highestNonce = job.startNonce;
+    bool allWorkersCompleted = workers.isNotEmpty;
     
-    // Add current hash rate to history (limit history to last 10 readings)
-    _hashRateHistory[jobId]!.add(totalHashRate);
-    if (_hashRateHistory[jobId]!.length > 10) {
-      _hashRateHistory[jobId]!.removeAt(0);
-    }
-    
-    // Calculate moving average hash rate for stability
-    final avgHashRate = _hashRateHistory[jobId]!.isNotEmpty 
-        ? _hashRateHistory[jobId]!.reduce((a, b) => a + b) / _hashRateHistory[jobId]!.length
-        : 0.0;
-    
-    // Calculate remaining time based on average hash rate and remaining nonces
-    double remainingTime = 0.0;
-    if (avgHashRate > 0 && endNonce > 0) {
-      // Find the highest nonce processed by any worker
-      final highestNonce = _jobWorkers[jobId]!.fold(
-        startNonce, 
-        (highest, worker) => worker.lastProcessedNonce > highest ? worker.lastProcessedNonce : highest
-      );
+    for (final worker in workers) {
+      totalHashRate += worker.hashRate; 
+      if (worker.lastProcessedNonce > highestNonce) {
+        highestNonce = worker.lastProcessedNonce;
+      }
       
-      final remainingNonces = endNonce - highestNonce;
-      if (remainingNonces > 0) {
-        remainingTime = remainingNonces / avgHashRate;
-        // Apply some smoothing to remaining time to avoid jumps
-        if (_lastRemainingTimes.containsKey(jobId)) {
-          final lastTime = _lastRemainingTimes[jobId]!;
-          // Use weighted average (70% new, 30% old) for smoother transitions
-          remainingTime = (remainingTime * 0.7) + (lastTime * 0.3);
-        }
-        _lastRemainingTimes[jobId] = remainingTime;
+      // Check if any worker is still active
+      if (worker.isActive) {
+        allWorkersCompleted = false;
       }
     }
     
-    // Count active workers
-    final activeWorkers = _jobWorkers[jobId]!.where((w) => w.isActive).length;
+    // Calculate progress
+    final totalRange = job.endNonce - job.startNonce;
+    final progress = totalRange > 0 
+        ? ((highestNonce - job.startNonce) / totalRange * 100).clamp(0.0, 100.0) 
+        : 0.0;
     
-    // Find the highest nonce processed by any worker
-    final currentNonce = _jobWorkers[jobId]!.fold(
-      startNonce, 
-      (highest, worker) => worker.lastProcessedNonce > highest ? worker.lastProcessedNonce : highest
-    );
+    // Calculate remaining time
+    double remainingTime = 0.0;
+    if (totalHashRate > 0 && totalRange > 0) {
+      final remainingHashes = job.endNonce - highestNonce;
+      remainingTime = remainingHashes / (totalHashRate * 1000); // Convert to seconds
+    }
     
-    return {
+    // Notify listeners through the stream controller
+    _jobUpdateController.add({
+      'jobId': jobId,
       'progress': progress,
-      'hashRate': avgHashRate,
+      'hashRate': totalHashRate,
       'remainingTime': remainingTime,
-      'currentNonce': currentNonce,
-      'activeWorkers': activeWorkers,
-    };
+      'currentNonce': highestNonce,
+      'workerDetails': workers.map((worker) => {
+        'workerId': worker.id,
+        'lastNonce': worker.lastProcessedNonce,
+        'status': worker.status,
+        'hashRate': worker.hashRate,
+        'startNonce': worker.currentBatchStart,
+        'endNonce': worker.currentBatchEnd,
+        'isActive': worker.isActive,
+      }).toList(),
+      'isPaused': _pausedJobs.containsKey(jobId),
+      'isCompleted': job.completed,
+      'isSuccessful': job.successful,
+    });
   }
 
   // Expose job retrieval from the job service
@@ -1221,6 +1240,7 @@ class MiningService {
         broadcastError: e.toString(),
       ));
 
+      // Re-throw the error for the caller to handle
       throw e;
     }
   }
@@ -1239,68 +1259,470 @@ class MiningService {
 
   // Save the current state of all active jobs
   Future<void> saveJobState() async {
-    debugPrint('Saving state for all active jobs');
+    debugPrint('Saving state for all active and completed jobs');
     
     // For each active job, update its last tried nonce
     for (final jobId in _activeJobs.keys) {
       final job = _activeJobs[jobId];
-      final isPaused = _pausedJobs[jobId] ?? false;
+      final isPaused = _pausedJobs[jobId] != null;
       
       if (job != null) {
-        debugPrint('Saving state for job $jobId (isPaused: $isPaused)');
-        
-        // Find the highest nonce processed by any worker
+        // Get the highest nonce processed by any worker
         int highestNonce = job.lastTriedNonce;
-        if (_jobWorkers.containsKey(jobId)) {
-          for (final worker in _jobWorkers[jobId]!) {
-            if (worker.lastProcessedNonce > highestNonce) {
-              highestNonce = worker.lastProcessedNonce;
-            }
+        
+        // Update worker nonce states
+        Map<int, int> updatedWorkerNonces = Map.from(job.workerLastNonces);
+        
+        for (final worker in _jobWorkers[jobId] ?? []) {
+          if (worker.lastProcessedNonce > highestNonce) {
+            highestNonce = worker.lastProcessedNonce;
           }
+          
+          // Update the worker's last nonce in the job state
+          updatedWorkerNonces[worker.id] = worker.lastProcessedNonce;
         }
         
-        try {
-          // Get the latest job from storage
-          final storedJob = await _jobService.getJob(jobId);
-          if (storedJob != null) {
-            // Update the job with the latest nonce but preserve its completion status
-            // For paused jobs, we want to ensure they remain incomplete so they can be resumed
-            final updatedJob = storedJob.copyWith(
-              lastTriedNonce: highestNonce,
-              // If the job is paused, ensure it's not marked as completed
-              completed: isPaused ? false : storedJob.completed,
-            );
-            
-            await _jobService.updateJob(updatedJob);
-            debugPrint('Saved state for job $jobId at nonce $highestNonce');
-          }
-        } catch (e) {
-          debugPrint('Error saving state for job $jobId: $e');
-        }
+        // Create an updated job with the latest nonce information
+        final updatedJob = job.copyWith(
+          lastTriedNonce: highestNonce,
+          workerLastNonces: updatedWorkerNonces,
+        );
+        
+        // Update the job in the service
+        await _jobService.updateJob(updatedJob);
       }
     }
     
-    // Also save state for paused jobs that might not be in active jobs anymore
-    for (final jobId in _pausedJobs.keys) {
-      if (!_activeJobs.containsKey(jobId)) {
-        debugPrint('Saving state for paused job $jobId that is not in active jobs');
+    // Also save completed jobs
+    for (final jobId in _completedJobs.keys) {
+      final job = _completedJobs[jobId];
+      if (job != null) {
+        await _jobService.updateJob(job);
+      }
+    }
+  }
+
+  // Get a job by ID (synchronous version)
+  MiningJob? getJobSync(String jobId) {
+    if (_activeJobs.containsKey(jobId)) {
+      return _activeJobs[jobId];
+    }
+    
+    final pausedJob = _pausedJobs[jobId]; // Corrected access
+    
+    return pausedJob;
+  }
+
+  // Helper method to send commands to all workers for a job
+  void _sendCommandToWorkers(String jobId, String command, [Map<String, dynamic>? data]) {
+    final workers = _jobWorkers[jobId];
+    if (workers == null || workers.isEmpty) {
+      debugPrint('No workers found for job $jobId');
+      return;
+    }
+    
+    final Map<String, dynamic> message = <String, dynamic>{'command': command};
+    if (data != null) {
+      message.addAll(data);
+    }
+    
+    for (final worker in workers) {
+      _workerSendPorts[jobId]![worker.id]?.send(message);
+    }
+  }
+
+  // Clean up resources for a job
+  void _cleanupJob(String jobId) {
+    // Cancel receive streams
+    if (_receiveStreams.containsKey(jobId)) {
+      for (final stream in _receiveStreams[jobId]!) {
+        stream.cancel();
+      }
+      _receiveStreams.remove(jobId);
+    }
+    
+    // Close receive ports
+    if (_workerPorts.containsKey(jobId)) {
+      for (final workerId in _workerPorts[jobId]!.keys) {
+        _workerPorts[jobId]![workerId]!.close();
+      }
+      _workerPorts.remove(jobId);
+    }
+    
+    // Kill isolates
+    if (_workerIsolates.containsKey(jobId)) {
+      for (final workerId in _workerIsolates[jobId]!.keys) {
+        _workerIsolates[jobId]![workerId]!.kill(priority: Isolate.immediate);
+      }
+      _workerIsolates.remove(jobId);
+    }
+    
+    // Clean up send ports
+    if (_workerSendPorts.containsKey(jobId)) {
+      _workerSendPorts.remove(jobId);
+    }
+    
+    // Clean up job workers
+    if (_jobWorkers.containsKey(jobId)) {
+      _jobWorkers.remove(jobId);
+    }
+    
+    // Clean up job stats
+    if (_jobStats.containsKey(jobId)) {
+      _jobStats.remove(jobId);
+    }
+    
+    // Clean up hash rate history
+    if (_hashRateHistory.containsKey(jobId)) {
+      _hashRateHistory.remove(jobId);
+    }
+    
+    // Clean up last remaining times
+    if (_lastRemainingTimes.containsKey(jobId)) {
+      _lastRemainingTimes.remove(jobId);
+    }
+  }
+
+  // Worker isolate function
+  static void _workerIsolate(Map<String, dynamic> params) {
+    final sendPort = params['sendPort'] as SendPort;
+    final workerId = params['workerId'] as int;
+    final jobId = params['jobId'] as String;
+    final content = params['content'] as String;
+    final leader = params['leader'] as String;
+    final height = params['height'] as int;
+    final owner = params['owner'] as String;
+    final rewardType = params['rewardType'] as String; // Received as string '0' or '1'
+    final difficulty = params['difficulty'] as int;
+    int startNonce = params['startNonce'] as int;
+    int endNonce = params['endNonce'] as int;
+    
+    // Create a receive port for communication with the main isolate
+    final receivePort = ReceivePort();
+    
+    // Send the receive port to the main isolate
+    sendPort.send({
+      'port': receivePort.sendPort,
+    });
+    
+    // Variables for tracking mining progress
+    bool isMining = false;
+    int lastProcessedNonce = startNonce - 1;
+    int hashesProcessed = 0;
+    int lastReportTime = DateTime.now().millisecondsSinceEpoch;
+    
+    // Function to start mining
+    void startMining() {
+      isMining = true;
+      
+      // Send status update
+      sendPort.send({
+        'status': 'mining',
+        'workerId': workerId,
+        'jobId': jobId,
+        'lastProcessedNonce': lastProcessedNonce,
+        'hashesProcessed': hashesProcessed,
+      });
+      
+      // Start mining loop
+      Timer.periodic(const Duration(milliseconds: 10), (timer) {
+        if (!isMining) {
+          timer.cancel();
+          return;
+        }
         
-        try {
-          // Get the job from storage
-          final storedJob = await _jobService.getJob(jobId);
-          if (storedJob != null) {
-            // Ensure the job is not marked as completed so it can be resumed
-            final updatedJob = storedJob.copyWith(
-              completed: false,
-            );
+        // Process a batch of nonces
+        for (int i = 0; i < 100; i++) {
+          // Check if we've reached the end of our range
+          if (lastProcessedNonce >= endNonce) {
+            timer.cancel();
+            isMining = false;
             
-            await _jobService.updateJob(updatedJob);
-            debugPrint('Saved state for paused job $jobId');
+            // Send batch complete status
+            sendPort.send({
+              'status': 'batchComplete',
+              'workerId': workerId,
+              'jobId': jobId,
+              'lastProcessedNonce': lastProcessedNonce,
+              'hashesProcessed': hashesProcessed,
+            });
+            return;
           }
-        } catch (e) {
-          debugPrint('Error saving state for paused job $jobId: $e');
+          
+          // Increment the nonce
+          lastProcessedNonce++;
+          hashesProcessed++;
+          
+          // Convert rewardType from string to int for HashUtils.createTicket
+          final rewardTypeInt = int.parse(rewardType);
+          final timestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+          
+          // Check if we've found a solution
+          final hash = HashUtils.createTicket(
+            content,
+            leader,
+            height,
+            owner,
+            rewardTypeInt, // Pass as int to HashUtils
+            timestamp,
+            lastProcessedNonce,
+          );
+          
+          // Check if the hash meets the difficulty requirement
+          final targetPrefix = '0' * difficulty;
+          if (hash.startsWith(targetPrefix)) {
+            timer.cancel();
+            isMining = false;
+            
+            // Send solution found status
+            sendPort.send({
+              'status': 'solutionFound',
+              'workerId': workerId,
+              'jobId': jobId,
+              'lastProcessedNonce': lastProcessedNonce,
+              'hashesProcessed': hashesProcessed,
+              'nonce': lastProcessedNonce,
+              'hash': hash,
+            });
+            return;
+          }
+        }
+        
+        // Send progress update every second
+        final currentTime = DateTime.now().millisecondsSinceEpoch;
+        if (currentTime - lastReportTime >= 1000) {
+          sendPort.send({
+            'status': 'progress',
+            'workerId': workerId,
+            'jobId': jobId,
+            'lastProcessedNonce': lastProcessedNonce,
+            'hashesProcessed': hashesProcessed,
+          });
+          
+          // Reset the hashes processed counter for the next report
+          // but keep the total for this batch
+          hashesProcessed = 0;
+          lastReportTime = currentTime;
+        }
+      });
+    }
+    
+    // Listen for commands from the main isolate
+    receivePort.listen((message) {
+      if (message is Map<String, dynamic>) {
+        final command = message['command'] as String;
+        
+        switch (command) {
+          case 'pause':
+            isMining = false;
+            sendPort.send({
+              'status': 'paused',
+              'workerId': workerId,
+              'jobId': jobId,
+              'lastProcessedNonce': lastProcessedNonce,
+              'hashesProcessed': hashesProcessed,
+            });
+            break;
+            
+          case 'resume':
+            if (!isMining) {
+              startMining();
+            }
+            break;
+            
+          case 'stop':
+            isMining = false;
+            // Close the receive port
+            receivePort.close();
+            break;
+            
+          case 'newBatch':
+            // Update the nonce range
+            startNonce = message['startNonce'] as int;
+            endNonce = message['endNonce'] as int;
+            lastProcessedNonce = startNonce - 1;
+            hashesProcessed = 0;
+            
+            // If we were mining, stop the current mining process
+            isMining = false;
+            
+            // Start mining with the new batch after a short delay
+            // to ensure any existing mining loops are canceled
+            Future.delayed(Duration(milliseconds: 50), () {
+              startMining();
+            });
+            break;
         }
       }
+    });
+    
+    // Send initial status
+    sendPort.send({
+      'status': 'ready',
+      'workerId': workerId,
+      'jobId': jobId,
+      'lastProcessedNonce': lastProcessedNonce,
+      'hashesProcessed': hashesProcessed,
+    });
+    
+    // Start mining automatically after sending ready status
+    startMining();
+  }
+  
+  // Calculate stable hash rate with moving average
+  static double _calculateStableHashRate(int hashesChecked, DateTime startTime, List<double> history) {
+    final duration = DateTime.now().difference(startTime).inMilliseconds / 1000.0;
+    if (duration <= 0) return 0.0;
+    
+    final currentRate = hashesChecked / duration; // Calculate hashes per second
+    
+    // Add to history (limit to last 10 readings)
+    history.add(currentRate);
+    if (history.length > 10) {
+      history.removeAt(0);
+    }
+    
+    // Return moving average
+    return history.isNotEmpty ? history.reduce((a, b) => a + b) / history.length : 0.0;
+  }
+  
+  // Calculate stable remaining time with smoothing
+  static double _calculateStableRemainingTime(
+    int currentNonce, int startNonce, int endNonce, int hashesChecked, DateTime startTime, List<double> hashRateHistory) {
+    if (endNonce == -1) {
+      // If no end nonce is specified, we can't calculate remaining time
+      return 0.0;
+    }
+    
+    final hashRate = _calculateStableHashRate(hashesChecked, startTime, hashRateHistory);
+    if (hashRate <= 0) return 0.0;
+    
+    return (endNonce - currentNonce) / hashRate;
+  }
+  
+  // Resume a previously paused job
+  Future<void> resumeJob(String jobId) async {
+    await _lock.synchronized(() async {
+      // Check if the job is paused
+      if (!_pausedJobs.containsKey(jobId)) {
+        debugPrint('Job $jobId is not paused');
+        return;
+      }
+      
+      // Get the paused job
+      final pausedJob = _pausedJobs[jobId]!;
+      
+      // Remove from paused jobs
+      _pausedJobs.remove(jobId);
+      
+      // Start mining with the job's parameters
+      await startMining(
+        jobId: pausedJob.id,
+        content: pausedJob.content,
+        leader: pausedJob.leader,
+        owner: pausedJob.owner,
+        height: pausedJob.height,
+        rewardType: pausedJob.rewardType, // Pass as string per memory requirement
+        difficulty: pausedJob.difficulty,
+        startNonce: pausedJob.startNonce,
+        endNonce: pausedJob.endNonce,
+        resumeFromNonce: pausedJob.lastTriedNonce,
+        workerLastNonces: pausedJob.workerLastNonces, // Pass saved worker nonce state
+        onUpdate: (update) {
+          // Forward updates to any listeners
+          _jobUpdateController.add({
+            'jobId': jobId,
+            'update': update,
+          });
+        },
+      );
+      
+      debugPrint('Resumed job $jobId from nonce ${pausedJob.lastTriedNonce}');
+    });
+  }
+
+  // Broadcast a ticket to the node
+  Future<void> _broadcastTicket(String jobId, MiningJob job, int nonce) async {
+    try {
+      debugPrint(' Broadcasting ticket:');
+      debugPrint('  Content: ${job.content}');
+      debugPrint('  Leader: ${job.leader}');
+      debugPrint('  Height: ${job.height}');
+      debugPrint('  Owner: ${job.owner}');
+      debugPrint('  Reward Type: ${job.rewardType}');
+      debugPrint('  Nonce: $nonce');
+      
+      final timestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      debugPrint('  Timestamp: $timestamp');
+
+      final ticketHex = HashUtils.ticketToHex(
+        job.content,
+        job.leader,
+        job.height,
+        job.owner,
+        int.parse(job.rewardType), // Convert to int for HashUtils
+        timestamp,
+        nonce,
+      );
+      debugPrint('  Generated Ticket Hex: $ticketHex');
+
+      final broadcastResponse = await _nodeService.broadcastRawSupportTicket(ticketHex);
+      
+      // Update the job with broadcast information
+      final updatedJob = job.copyWith(
+        broadcastSuccessful: true,
+        broadcastHash: broadcastResponse.hash,
+        completed: true,     // Ensure job is marked as completed
+        successful: true,    // Ensure job is marked as successful
+      );
+      
+      // Update in memory - both active and completed collections
+      if (_activeJobs.containsKey(jobId)) {
+        _activeJobs[jobId] = updatedJob;
+      }
+      _completedJobs[jobId] = updatedJob;
+      
+      // Remove from active jobs if it's still there
+      if (_activeJobs.containsKey(jobId)) {
+        _activeJobs.remove(jobId);
+      }
+      
+      // Update in persistent storage
+      await _jobService.updateJob(updatedJob);
+
+      debugPrint(' Broadcast successful:');
+      debugPrint('  Job ID: $jobId');
+      debugPrint('  Broadcast Hash: ${broadcastResponse.hash}');
+      
+      return;
+    } catch (e) {
+      debugPrint(' Error broadcasting solution:');
+      debugPrint('  Error: $e');
+
+      // Update the job with broadcast error
+      final updatedJob = job.copyWith(
+        broadcastSuccessful: false,
+        broadcastError: e.toString(),
+        completed: true,     // Still mark as completed even if broadcast failed
+        successful: true,    // Still mark as successful even if broadcast failed
+      );
+      
+      // Update in memory - both active and completed collections
+      if (_activeJobs.containsKey(jobId)) {
+        _activeJobs[jobId] = updatedJob;
+      }
+      _completedJobs[jobId] = updatedJob;
+      
+      // Remove from active jobs if it's still there
+      if (_activeJobs.containsKey(jobId)) {
+        _activeJobs.remove(jobId);
+      }
+      
+      // Update in persistent storage
+      await _jobService.updateJob(updatedJob);
+
+      // Re-throw the error for the caller to handle
+      throw e;
     }
   }
 }

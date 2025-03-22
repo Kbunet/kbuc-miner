@@ -3,7 +3,18 @@ import '../services/node_service.dart';
 import '../models/node_settings.dart';
 
 class CreateMiningJobDialog extends StatefulWidget {
-  const CreateMiningJobDialog({Key? key}) : super(key: key);
+  final Function(
+    String content,
+    String leader,
+    String owner,
+    int height,
+    String rewardType,
+    int difficulty,
+    int startNonce,
+    int endNonce,
+  )? onSubmit;
+
+  const CreateMiningJobDialog({Key? key, this.onSubmit}) : super(key: key);
 
   @override
   State<CreateMiningJobDialog> createState() => _CreateMiningJobDialogState();
@@ -307,18 +318,37 @@ class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
                         final startNonceText = _startNonceController.text;
                         final endNonceText = _endNonceController.text;
                         
-                        Navigator.of(context).pop({
-                          'supportedHash': _supportedHashController.text,
-                          'leader': _leaderController.text,
-                          'height': int.parse(_heightController.text),
-                          'jobOwner': _jobOwnerController.text,
-                          'rewardType': _rewardType,
-                          'difficulty': int.parse(_difficultyController.text),
-                          'nonceRange': [
-                            startNonceText.isEmpty ? 0 : int.parse(startNonceText),
-                            endNonceText.isEmpty ? -1 : int.parse(endNonceText), // -1 indicates no end limit
-                          ],
-                        });
+                        final startNonce = startNonceText.isEmpty ? 0 : int.parse(startNonceText);
+                        final endNonce = endNonceText.isEmpty ? 0x7FFFFFFF : int.parse(endNonceText);
+                        
+                        if (widget.onSubmit != null) {
+                          widget.onSubmit!(
+                            _supportedHashController.text,
+                            _leaderController.text,
+                            _jobOwnerController.text,
+                            int.parse(_heightController.text),
+                            _rewardType, // Passing as string '0' or '1' per memory requirement
+                            int.parse(_difficultyController.text),
+                            startNonce,
+                            endNonce,
+                          );
+                        } else {
+                          // Fallback to old behavior for backward compatibility
+                          Navigator.of(context).pop({
+                            'supportedHash': _supportedHashController.text,
+                            'leader': _leaderController.text,
+                            'height': int.parse(_heightController.text),
+                            'jobOwner': _jobOwnerController.text,
+                            'rewardType': _rewardType, // Passing as string '0' or '1' per memory requirement
+                            'difficulty': int.parse(_difficultyController.text),
+                            'nonceRange': [
+                              startNonce,
+                              endNonce,
+                            ],
+                          });
+                        }
+                        
+                        Navigator.of(context).pop();
                       }
                     },
                     child: const Text('Create'),

@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:miner_app/models/mining_job.dart';
 import 'create_mining_job_dialog.dart';
 
-class MiningCard extends StatelessWidget {
+class MiningCard extends StatefulWidget {
   final String jobId;
   final double progress;
   final double hashRate;
@@ -10,9 +11,12 @@ class MiningCard extends StatelessWidget {
   final double speedMultiplier;
   final int lastTriedNonce;
   final int activeWorkers;
-  final VoidCallback onPauseResume;
+  final List<Map<String, dynamic>> workerDetails; 
+  final VoidCallback onPause;
+  final VoidCallback onResume;
   final VoidCallback onStop;
   final Function(double) onSpeedChange;
+  final MiningJob? job;
 
   const MiningCard({
     Key? key,
@@ -24,139 +28,339 @@ class MiningCard extends StatelessWidget {
     required this.speedMultiplier,
     required this.lastTriedNonce,
     this.activeWorkers = 0,
-    required this.onPauseResume,
+    this.workerDetails = const [], 
+    required this.onPause,
+    required this.onResume,
     required this.onStop,
     required this.onSpeedChange,
+    this.job,
   }) : super(key: key);
 
-  String _formatHashRate(double rate) {
-    if (rate >= 1000000) {
-      return '${(rate / 1000000).toStringAsFixed(2)} MH/s';
-    } else if (rate >= 1000) {
-      return '${(rate / 1000).toStringAsFixed(2)} KH/s';
-    }
-    return '${rate.toStringAsFixed(2)} H/s';
-  }
+  @override
+  State<MiningCard> createState() => _MiningCardState();
+}
 
+class _MiningCardState extends State<MiningCard> {
+  double _speedMultiplier = 1.0;
+  
+  @override
+  void initState() {
+    super.initState();
+    _speedMultiplier = widget.speedMultiplier;
+  }
+  
+  Widget _buildStatItem(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+            fontSize: 12.0,
+          ),
+        ),
+        const SizedBox(height: 4.0),
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 14.0,
+          ),
+        ),
+      ],
+    );
+  }
+  
+  String _formatHashRate(double rate) {
+    if (rate < 1) {
+      return '${(rate * 1000).toStringAsFixed(2)} H/s';
+    } else if (rate < 1000) {
+      return '${rate.toStringAsFixed(2)} KH/s';
+    } else {
+      return '${(rate / 1000).toStringAsFixed(2)} MH/s';
+    }
+  }
+  
   String _formatDuration(double seconds) {
-    if (seconds.isInfinite || seconds.isNaN) return '--:--:--';
+    if (seconds.isInfinite || seconds.isNaN || seconds <= 0) {
+      return 'Unknown';
+    }
     
-    final Duration duration = Duration(seconds: seconds.round());
+    final duration = Duration(seconds: seconds.round());
     final hours = duration.inHours;
     final minutes = duration.inMinutes.remainder(60);
     final secs = duration.inSeconds.remainder(60);
     
-    return '${hours.toString().padLeft(2, '0')}:'
-           '${minutes.toString().padLeft(2, '0')}:'
-           '${secs.toString().padLeft(2, '0')}';
+    if (hours > 0) {
+      return '${hours}h ${minutes}m';
+    } else if (minutes > 0) {
+      return '${minutes}m ${secs}s';
+    } else {
+      return '${secs}s';
+    }
   }
-
+  
   @override
   Widget build(BuildContext context) {
-    // Display only first 8 chars of job ID for UI cleanliness
-    final displayJobId = jobId.length > 8 ? '${jobId.substring(0, 8)}...' : jobId;
+    final progress = widget.progress;
+    final hashRate = widget.hashRate;
+    final remainingTime = widget.remainingTime;
+    final lastTriedNonce = widget.lastTriedNonce;
+    final workerDetails = widget.workerDetails;
+    final hasEndNonce = widget.job?.endNonce != null && 
+                        widget.job!.endNonce > 0 && 
+                        widget.job!.endNonce != 0x7FFFFFFF;
     
     return Card(
-      elevation: 4,
-      margin: const EdgeInsets.all(8),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      margin: const EdgeInsets.all(8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Job header with controls
+          Container(
+            padding: const EdgeInsets.all(8.0),
+            decoration: BoxDecoration(
+              color: Colors.blue.shade100,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(4.0),
+                topRight: Radius.circular(4.0),
+              ),
+            ),
+            child: Row(
               children: [
                 Expanded(
                   child: Text(
-                    'Job: $displayJobId',
+                    'Job: ${widget.jobId}',
                     style: const TextStyle(
-                      fontSize: 18,
                       fontWeight: FontWeight.bold,
+                      fontSize: 16.0,
                     ),
-                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
+                // Pause/Resume button
+                IconButton(
+                  icon: Icon(
+                    widget.isPaused ? Icons.play_arrow : Icons.pause,
+                    color: widget.isPaused ? Colors.green : Colors.orange,
+                  ),
+                  onPressed: () {
+                    if (widget.isPaused) {
+                      widget.onResume();
+                    } else {
+                      widget.onPause();
+                    }
+                  },
+                ),
+                // Stop button
+                IconButton(
+                  icon: const Icon(
+                    Icons.stop,
+                    color: Colors.red,
+                  ),
+                  onPressed: widget.onStop,
+                ),
+              ],
+            ),
+          ),
+          
+          // Job progress and stats
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Progress bar (only show if there's an end nonce)
+                if (hasEndNonce) ...[
+                  Row(
+                    children: [
+                      Text('${progress.toStringAsFixed(1)}%'),
+                      const SizedBox(width: 8.0),
+                      Expanded(
+                        child: LinearProgressIndicator(
+                          value: progress / 100,
+                          backgroundColor: Colors.grey.shade200,
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            widget.isPaused ? Colors.orange : Colors.blue,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16.0),
+                ],
+                
+                // Stats grid
                 Row(
                   children: [
-                    // Pause/Resume button with clear visual indicator and tooltip
-                    IconButton(
-                      icon: Icon(
-                        isPaused ? Icons.play_arrow : Icons.pause,
-                        color: isPaused ? Colors.green : Colors.orange,
+                    Expanded(
+                      child: _buildStatItem(
+                        'Hash Rate',
+                        _formatHashRate(hashRate),
                       ),
-                      onPressed: () {
-                        debugPrint('Pause/Resume pressed for job: $jobId');
-                        onPauseResume();
-                      },
-                      tooltip: isPaused ? 'Resume Mining' : 'Pause Mining',
                     ),
-                    // Stop button with tooltip
-                    IconButton(
-                      icon: const Icon(Icons.stop, color: Colors.red),
-                      onPressed: () {
-                        debugPrint('Stop pressed for job: $jobId');
-                        onStop();
-                      },
-                      tooltip: 'Stop Mining',
+                    if (hasEndNonce)
+                      Expanded(
+                        child: _buildStatItem(
+                          'Remaining',
+                          _formatDuration(remainingTime),
+                        ),
+                      ),
+                    Expanded(
+                      child: _buildStatItem(
+                        'Current Nonce',
+                        lastTriedNonce.toString(),
+                      ),
+                    ),
+                    Expanded(
+                      child: _buildStatItem(
+                        'Workers',
+                        widget.activeWorkers.toString(),
+                      ),
                     ),
                   ],
                 ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: LinearProgressIndicator(
-                value: progress / 100,
-                minHeight: 10,
-                backgroundColor: Colors.grey[200],
-                valueColor: AlwaysStoppedAnimation<Color>(
-                  Theme.of(context).primaryColor,
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text('${progress.toStringAsFixed(1)}%'),
-                Text('ETA: ${_formatDuration(remainingTime)}'),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                
+                // Speed control slider
+                Row(
                   children: [
-                    Text('Hash Rate: ${_formatHashRate(hashRate)}'),
-                    Text('Remaining: ${_formatDuration(remainingTime)}'),
-                    Text('Current Nonce: ${lastTriedNonce.toString()}'),
-                    Text('Workers: $activeWorkers'),
-                  ],
-                ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text('Speed: ${speedMultiplier.toStringAsFixed(1)}x'),
-                    Slider(
-                      value: speedMultiplier,
-                      min: 0.1,
-                      max: 5.0,
-                      divisions: 49,
-                      label: '${speedMultiplier.toStringAsFixed(1)}x',
-                      onChanged: (value) {
-                        if (value != null) onSpeedChange(value);
-                      },
+                    const Text('Speed:'),
+                    Expanded(
+                      child: Slider(
+                        value: _speedMultiplier,
+                        min: 0.5,
+                        max: 5.0,
+                        divisions: 9,
+                        label: '${_speedMultiplier.toStringAsFixed(1)}x',
+                        onChanged: (value) {
+                          setState(() {
+                            _speedMultiplier = value;
+                          });
+                          widget.onSpeedChange(value);
+                        },
+                      ),
                     ),
+                    Text('${_speedMultiplier.toStringAsFixed(1)}x'),
                   ],
                 ),
               ],
             ),
-          ],
-        ),
+          ),
+          
+          if (workerDetails.isNotEmpty)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.only(left: 16.0, top: 16.0, bottom: 8.0),
+                  child: Text(
+                    'Worker Details',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16.0,
+                    ),
+                  ),
+                ),
+                Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 16.0),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey.shade300),
+                    borderRadius: BorderRadius.circular(8.0),
+                  ),
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(8.0),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              flex: 1,
+                              child: Text(
+                                'Worker',
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                            Expanded(
+                              flex: 2,
+                              child: Text(
+                                'Last Nonce',
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                            Expanded(
+                              flex: 1,
+                              child: Text(
+                                'Hash Rate',
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                            Expanded(
+                              flex: 1,
+                              child: Text(
+                                'Status',
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Divider(height: 1),
+                      ...workerDetails.map((worker) {
+                        final workerId = worker['workerId'] as int? ?? 0;
+                        final lastNonce = worker['lastNonce'] as int? ?? 0;
+                        final workerHashRate = worker['hashRate'] as double? ?? 0.0;
+                        final status = worker['status'] as String? ?? 'Idle';
+                        
+                        Color statusColor = Colors.grey;
+                        if (status == 'mining') {
+                          statusColor = Colors.green;
+                        } else if (status == 'paused') {
+                          statusColor = Colors.orange;
+                        } else if (status == 'completed') {
+                          statusColor = Colors.blue;
+                        }
+                        
+                        return Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                flex: 1,
+                                child: Text('#$workerId'),
+                              ),
+                              Expanded(
+                                flex: 2,
+                                child: Text('$lastNonce'),
+                              ),
+                              Expanded(
+                                flex: 1,
+                                child: Text('${workerHashRate.toStringAsFixed(2)} KH/s'),
+                              ),
+                              Expanded(
+                                flex: 1,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 2.0),
+                                  decoration: BoxDecoration(
+                                    color: statusColor.withOpacity(0.2),
+                                    borderRadius: BorderRadius.circular(4.0),
+                                  ),
+                                  child: Text(
+                                    status,
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(color: statusColor),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      }).toList(),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16.0),
+              ],
+            ),
+        ],
       ),
     );
   }
