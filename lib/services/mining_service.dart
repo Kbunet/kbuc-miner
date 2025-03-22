@@ -165,7 +165,7 @@ class MiningService {
             : startNonce + ((i + 1) * workerRangeSize) - 1;
         
         // Create a batch for this worker
-        final batchSize = 10000;
+        final batchSize = 1000; // Reduced from 10,000 to 1,000
         
         // For new jobs, always start from the worker's start range
         int workerLastNonce;
@@ -333,8 +333,8 @@ class MiningService {
       return;
     }
     
-    // Calculate batch size (10,000 nonces per batch)
-    final batchSize = 10000;
+    // Calculate batch size (1,000 nonces per batch)
+    final batchSize = 1000;
     
     // Calculate the new batch end, ensuring it's greater than newStart
     int newEnd = newStart + batchSize - 1; 
