@@ -68,7 +68,7 @@ class MiningService {
   
   // Batch size configuration
   static const int _baseBatchSize = 5000; // Base number of nonces per batch
-  static const int _minBatchSize = 1000;  // Minimum batch size
+  static const int _minBatchSize = 10000;  // Minimum batch size
   
   Future<void> _initializeService() async {
     // Load settings to get the number of CPU cores to use
@@ -175,7 +175,7 @@ class MiningService {
       debugPrint('Creating $workerCount workers for job $jobId');
       
       // Create workers with small, evenly distributed batches within the current sequential batch
-      final batchSize = 1000; // Each worker gets 1,000 nonces at a time
+      final batchSize = 10000; // Each worker gets 10,000 nonces at a time
       
       for (int i = 0; i < workerCount; i++) {
         // Calculate worker's initial batch
@@ -282,7 +282,7 @@ class MiningService {
     }
     
     // Define batch size
-    final batchSize = 1000; // Each worker gets 1,000 nonces at a time
+    final batchSize = 10000; // Each worker gets 10,000 nonces at a time
     
     // Calculate the next batch for this worker
     int newStart = _nextAvailableNonce[jobId] ?? job.startNonce;
