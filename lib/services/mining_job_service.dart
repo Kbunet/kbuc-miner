@@ -60,11 +60,25 @@ class MiningJobService {
 
   Future<List<MiningJob>> getActiveJobs() async {
     await _ensureInitialized();
-    return _jobs.where((job) => !job.completed).toList();
+    // Return only jobs that are neither completed nor successful
+    return _jobs.where((job) => 
+      !job.completed && 
+      !job.successful
+    ).toList();
   }
 
   Future<List<MiningJob>> getSuccessfulJobs() async {
     await _ensureInitialized();
+    // Return only jobs that are marked as successful
     return _jobs.where((job) => job.successful).toList();
+  }
+
+  Future<List<MiningJob>> getNonSuccessfulActiveJobs() async {
+    await _ensureInitialized();
+    // Return only jobs that are neither completed nor successful
+    return _jobs.where((job) => 
+      !job.completed && 
+      !job.successful
+    ).toList();
   }
 }

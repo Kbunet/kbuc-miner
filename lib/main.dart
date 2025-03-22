@@ -171,12 +171,17 @@ class _MinerAppHomeState extends State<MinerAppHome> {
       }
 
       if (update['status'] == 'found') {
+        // Show a success notification
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Solution found for job $jobId!'),
             backgroundColor: Colors.green,
           ),
         );
+        
+        // Remove the job from the active jobs list in the UI
+        _jobs.remove(jobId);
+        _pausedJobs.remove(jobId);
       } else if (update['status'] == 'completed') {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(

@@ -159,8 +159,13 @@ class MiningService {
                 endTime: DateTime.now(),
                 lastTriedNonce: message.containsKey('currentNonce') ? 
                     message['currentNonce'] as int : storedJob.lastTriedNonce,
+                completed: true, // Mark as completed
+                successful: message['status'] == 'found', // Mark as successful if solution found
               );
               _jobService.updateJob(updatedJob);
+              
+              // Remove from active jobs
+              _activeJobs.remove(jobId);
             }
           });
 
@@ -170,32 +175,36 @@ class MiningService {
             final nonce = solution['nonce'] as int;
             final hash = solution['hash'] as String;
             
-            // Update the job with the found solution
-            final updatedJob = _activeJobs[jobId]?.copyWith(
-              foundNonce: nonce,
-              foundHash: hash,
-              successful: true,
-              completed: true,
-              endTime: DateTime.now(),
-              lastTriedNonce: nonce,
-            );
-            
-            if (updatedJob != null) {
+            // Get the existing job first
+            final existingJob = await _jobService.getJob(jobId);
+            if (existingJob != null) {
+              // Update the job with the found solution
+              final updatedJob = existingJob.copyWith(
+                foundNonce: nonce,
+                foundHash: hash,
+                successful: true,
+                completed: true,
+                endTime: DateTime.now(),
+                lastTriedNonce: nonce,
+              );
+              
               await _jobService.updateJob(updatedJob);
-              _activeJobs[jobId] = updatedJob;
-            }
-            
-            final ticket = HashUtils.ticketToHex(
-              content,
-              leader,
-              height,
-              owner,
-              int.parse(rewardType), // Convert string to int for HashUtils per memory requirement
-              DateTime.now().millisecondsSinceEpoch ~/ 1000,
-              nonce,
-            );
+              
+              // Remove from active jobs
+              _activeJobs.remove(jobId);
+              
+              final ticket = HashUtils.ticketToHex(
+                existingJob.content,
+                existingJob.leader,
+                existingJob.height,
+                existingJob.owner,
+                int.parse(existingJob.rewardType), // Convert string to int for HashUtils per memory requirement
+                DateTime.now().millisecondsSinceEpoch ~/ 1000,
+                nonce,
+              );
 
-            _nodeService.broadcastRawSupportTicket(ticket);
+              _nodeService.broadcastRawSupportTicket(ticket);
+            }
           }
         }
       }
@@ -352,15 +361,19 @@ class MiningService {
         if (shouldStop || isPaused) break;
 
         // Check if we've reached the end nonce
-        if (endNonce > 0 && currentNonce > endNonce) {
+        if (endNonce != -1 && currentNonce > endNonce) {
           timer.cancel();
+          receivePort.close();
+          
+          // Send completed status
           sendPort.send({
             'status': 'completed',
-            'message': 'Mining completed without finding a solution',
+            'progress': 1.0,
+            'hashRate': _calculateHashRate(hashesChecked, startTime),
+            'remainingTime': 0.0,
+            'currentNonce': currentNonce,
             'isPaused': false,
-            'currentNonce': currentNonce, // Include current nonce in status updates
           });
-          receivePort.close();
           return;
         }
 
@@ -427,9 +440,9 @@ class MiningService {
     return await _jobService.getJob(jobId);
   }
 
-  // Get all active jobs
+  // Get all active jobs that are not successful
   Future<List<MiningJob>> getActiveJobs() async {
-    return await _jobService.getActiveJobs();
+    return await _jobService.getNonSuccessfulActiveJobs();
   }
 
   Future<List<MiningJob>> getAllJobs() => _jobService.getAllJobs();
