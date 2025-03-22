@@ -18,7 +18,12 @@ class MiningJobService {
 
   Future<MiningJob?> getJob(String id) async {
     await _ensureInitialized();
-    return _jobs.firstWhere((job) => job.id == id);
+    try {
+      return _jobs.firstWhere((job) => job.id == id);
+    } catch (e) {
+      // Job not found
+      return null;
+    }
   }
 
   Future<void> addJob(MiningJob job) async {
@@ -39,6 +44,12 @@ class MiningJobService {
   Future<void> deleteJob(String id) async {
     await _ensureInitialized();
     _jobs.removeWhere((job) => job.id == id);
+    await MiningJob.saveAll(_jobs);
+  }
+
+  Future<void> clearAllJobs() async {
+    await _ensureInitialized();
+    _jobs.clear();
     await MiningJob.saveAll(_jobs);
   }
 

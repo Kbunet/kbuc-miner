@@ -21,6 +21,7 @@ class MiningJob {
   final bool broadcastSuccessful;
   final String? broadcastError;
   final String? broadcastHash;
+  final int lastTriedNonce; // Added to track the last nonce that was tried
 
   MiningJob({
     required this.id,
@@ -42,6 +43,7 @@ class MiningJob {
     this.broadcastSuccessful = false,
     this.broadcastError,
     this.broadcastHash,
+    this.lastTriedNonce = 0, // Default to startNonce if not provided
   });
 
   Duration? get duration {
@@ -69,6 +71,7 @@ class MiningJob {
     'broadcastSuccessful': broadcastSuccessful,
     'broadcastError': broadcastError,
     'broadcastHash': broadcastHash,
+    'lastTriedNonce': lastTriedNonce, // Added to JSON serialization
   };
 
   factory MiningJob.fromJson(Map<String, dynamic> json) => MiningJob(
@@ -91,6 +94,7 @@ class MiningJob {
     broadcastSuccessful: json['broadcastSuccessful'] ?? false,
     broadcastError: json['broadcastError'],
     broadcastHash: json['broadcastHash'],
+    lastTriedNonce: json['lastTriedNonce'] ?? json['startNonce'], // Use startNonce as fallback
   );
 
   MiningJob copyWith({
@@ -113,6 +117,7 @@ class MiningJob {
     bool? broadcastSuccessful,
     String? broadcastError,
     String? broadcastHash,
+    int? lastTriedNonce,
   }) {
     return MiningJob(
       id: id ?? this.id,
@@ -134,6 +139,7 @@ class MiningJob {
       broadcastSuccessful: broadcastSuccessful ?? this.broadcastSuccessful,
       broadcastError: broadcastError ?? this.broadcastError,
       broadcastHash: broadcastHash ?? this.broadcastHash,
+      lastTriedNonce: lastTriedNonce ?? this.lastTriedNonce,
     );
   }
 

@@ -14,7 +14,7 @@ class MiningService {
   final Map<String, StreamSubscription> _receiveStreams = {};
   final Map<String, bool> _pausedJobs = {};
   final Map<String, double> _speedMultipliers = {};
-  final Map<String, dynamic> _activeJobs = {};
+  final Map<String, MiningJob> _activeJobs = {};
   final _nodeService = NodeService();
   final _jobService = MiningJobService();
 
@@ -41,17 +41,27 @@ class MiningService {
     required String jobId,
     required String content,
     required String leader,
-    required int height,
     required String owner,
-    required String rewardType, // Keep as string '0' or '1' per memory requirement
+    required int height,
+    required String rewardType, // Kept as string '0' or '1' per memory requirement
     required int difficulty,
     required List<int> nonceRange,
     required Function(Map<String, dynamic>) onUpdate,
   }) async {
+    debugPrint('Creating new mining job: $jobId');
+    
     // Stop any existing job with this ID first
     stopMining(jobId);
     
-    debugPrint('Creating new mining job: $jobId');
+    // Check if job already exists in storage
+    int startNonce = nonceRange[0];
+    final existingJob = await _jobService.getJob(jobId);
+    
+    // If the job exists and has a lastTriedNonce, use that as the starting point
+    if (existingJob != null && existingJob.lastTriedNonce > startNonce) {
+      debugPrint('Resuming from last tried nonce: ${existingJob.lastTriedNonce}');
+      startNonce = existingJob.lastTriedNonce;
+    }
     
     // Create a job for the database
     final job = MiningJob(
@@ -65,10 +75,12 @@ class MiningService {
       startNonce: nonceRange[0],
       endNonce: nonceRange.length > 1 ? nonceRange[1] : -1,
       startTime: DateTime.now(),
+      lastTriedNonce: startNonce, // Initialize with the start nonce
     );
 
     // Save to database
     await _jobService.addJob(job);
+    _activeJobs[jobId] = job;
     
     // Create communication channels
     final receivePort = ReceivePort();
@@ -86,7 +98,7 @@ class MiningService {
         'owner': owner,
         'rewardType': rewardType, // Keep as string '0' or '1' per memory requirement
         'difficulty': difficulty,
-        'startNonce': nonceRange[0],
+        'startNonce': startNonce, // Use the potentially updated start nonce
         'endNonce': nonceRange.length > 1 ? nonceRange[1] : -1,
         'startPaused': false, // Start UNPAUSED by default
       },
@@ -94,18 +106,9 @@ class MiningService {
     
     // Store references
     _isolates[jobId] = isolate;
+    _receivePorts[jobId] = receivePort;
     _pausedJobs[jobId] = false;
     _speedMultipliers[jobId] = 1.0;
-    _activeJobs[jobId] = {
-      'content': content,
-      'leader': leader,
-      'height': height,
-      'owner': owner,
-      'rewardType': rewardType,
-      'difficulty': difficulty,
-      'startNonce': nonceRange[0],
-      'endNonce': nonceRange.length > 1 ? nonceRange[1] : -1,
-    };
 
     debugPrint('Mining started for job: $jobId');
     debugPrint('- Content: $content');
@@ -114,11 +117,11 @@ class MiningService {
     debugPrint('- Owner: $owner');
     debugPrint('- Reward Type: $rewardType');
     debugPrint('- Difficulty: $difficulty');
-    debugPrint('- Start Nonce: ${nonceRange[0]}');
+    debugPrint('- Start Nonce: $startNonce'); // Log the actual start nonce
     debugPrint('- End Nonce: ${nonceRange.length > 1 ? nonceRange[1] : "Unlimited"}');
 
     // Set up communication with the isolate
-    final subscription = receivePort.listen((message) {
+    final subscription = receivePort.listen((message) async {
       if (message is Map<String, dynamic> && message.containsKey('port')) {
         _sendPorts[jobId] = message['port'] as SendPort;
         completer.complete();
@@ -126,6 +129,25 @@ class MiningService {
 
       // Forward updates to the callback
       if (message is Map<String, dynamic> && message.containsKey('status')) {
+        // Add job ID to the message
+        message['jobId'] = jobId;
+        
+        // Update the last tried nonce if present
+        if (message.containsKey('currentNonce')) {
+          final currentNonce = message['currentNonce'] as int;
+          final updatedJob = _activeJobs[jobId]?.copyWith(
+            lastTriedNonce: currentNonce,
+          );
+          
+          if (updatedJob != null) {
+            _activeJobs[jobId] = updatedJob;
+            // Periodically save the last tried nonce (e.g., every 1000 nonces)
+            if (currentNonce % 1000 == 0) {
+              await _jobService.updateJob(updatedJob);
+            }
+          }
+        }
+        
         onUpdate(message);
 
         // For 'found' or 'completed' status, update the job in storage
@@ -135,6 +157,8 @@ class MiningService {
             if (storedJob != null) {
               final updatedJob = storedJob.copyWith(
                 endTime: DateTime.now(),
+                lastTriedNonce: message.containsKey('currentNonce') ? 
+                    message['currentNonce'] as int : storedJob.lastTriedNonce,
               );
               _jobService.updateJob(updatedJob);
             }
@@ -143,6 +167,24 @@ class MiningService {
           // For 'found' status, broadcast the solution
           if (message['status'] == 'found' && message.containsKey('solution')) {
             final solution = message['solution'] as Map<String, dynamic>;
+            final nonce = solution['nonce'] as int;
+            final hash = solution['hash'] as String;
+            
+            // Update the job with the found solution
+            final updatedJob = _activeJobs[jobId]?.copyWith(
+              foundNonce: nonce,
+              foundHash: hash,
+              successful: true,
+              completed: true,
+              endTime: DateTime.now(),
+              lastTriedNonce: nonce,
+            );
+            
+            if (updatedJob != null) {
+              await _jobService.updateJob(updatedJob);
+              _activeJobs[jobId] = updatedJob;
+            }
+            
             final ticket = HashUtils.ticketToHex(
               content,
               leader,
@@ -150,7 +192,7 @@ class MiningService {
               owner,
               int.parse(rewardType), // Convert string to int for HashUtils per memory requirement
               DateTime.now().millisecondsSinceEpoch ~/ 1000,
-              solution['nonce'] as int,
+              nonce,
             );
 
             _nodeService.broadcastRawSupportTicket(ticket);
@@ -246,12 +288,12 @@ class MiningService {
 
     // Send initial status update
     sendPort.send({
-      'jobId': jobId,
       'status': 'running',
       'progress': 0.0,
       'hashRate': 0.0,
       'remainingTime': 0.0,
       'isPaused': isPaused,
+      'currentNonce': currentNonce, // Include current nonce in status updates
     });
 
     // Listen for commands
@@ -263,17 +305,17 @@ class MiningService {
           debugPrint('Mining isolate received pause command for job: $jobId');
           isPaused = true;
           sendPort.send({
-            'jobId': jobId,
             'status': 'paused',
             'isPaused': true,
+            'currentNonce': currentNonce, // Include current nonce in status updates
           });
         } else if (command == 'resume') {
           debugPrint('Mining isolate received resume command for job: $jobId');
           isPaused = false;
           sendPort.send({
-            'jobId': jobId,
             'status': 'running',
             'isPaused': false,
+            'currentNonce': currentNonce, // Include current nonce in status updates
           });
         } else if (command == 'stop') {
           debugPrint('Mining isolate received stop command for job: $jobId');
@@ -293,13 +335,13 @@ class MiningService {
       if (isPaused) {
         // Skip processing while paused, but continue sending status updates
         sendPort.send({
-          'jobId': jobId,
           'status': 'running',
           'progress': _calculateProgress(currentNonce, startNonce, endNonce),
           'hashRate': _calculateHashRate(hashesChecked, startTime),
           'remainingTime': _calculateRemainingTime(
             currentNonce, startNonce, endNonce, hashesChecked, startTime),
           'isPaused': true,
+          'currentNonce': currentNonce, // Include current nonce in status updates
         });
         return;
       }
@@ -313,10 +355,10 @@ class MiningService {
         if (endNonce > 0 && currentNonce > endNonce) {
           timer.cancel();
           sendPort.send({
-            'jobId': jobId,
             'status': 'completed',
             'message': 'Mining completed without finding a solution',
             'isPaused': false,
+            'currentNonce': currentNonce, // Include current nonce in status updates
           });
           receivePort.close();
           return;
@@ -343,13 +385,13 @@ class MiningService {
             // Solution found
             timer.cancel();
             sendPort.send({
-              'jobId': jobId,
               'status': 'found',
               'solution': {
                 'nonce': currentNonce,
                 'hash': hash,
               },
               'isPaused': false,
+              'currentNonce': currentNonce, // Include current nonce in status updates
             });
             receivePort.close();
             return;
@@ -369,14 +411,13 @@ class MiningService {
         currentNonce, startNonce, endNonce, hashesChecked, startTime);
 
       sendPort.send({
-        'jobId': jobId,
         'status': 'running',
         'progress': progress,
         'hashRate': hashRate,
         'remainingTime': remainingTime,
-        'currentNonce': currentNonce,
         'hashesChecked': hashesChecked,
         'isPaused': false,
+        'currentNonce': currentNonce, // Include current nonce in status updates
       });
     });
   }
@@ -475,5 +516,22 @@ class MiningService {
 
       throw e;
     }
+  }
+
+  // Stop all mining jobs and clear history
+  Future<void> clearAllJobs() async {
+    // First stop all active mining jobs
+    final activeJobIds = List<String>.from(_activeJobs.keys);
+    for (final jobId in activeJobIds) {
+      stopMining(jobId);
+    }
+    
+    // Clear all jobs from storage
+    await _jobService.clearAllJobs();
+    
+    // Clear local state
+    _activeJobs.clear();
+    _pausedJobs.clear();
+    _speedMultipliers.clear();
   }
 }

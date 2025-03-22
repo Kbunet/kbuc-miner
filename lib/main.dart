@@ -63,12 +63,13 @@ class _MinerAppHomeState extends State<MinerAppHome> {
           'height': job.height,
           'rewardType': job.rewardType, // Keep as string '0' or '1' per memory requirement
           'difficulty': job.difficulty,
-          'startNonce': job.foundNonce != null ? job.foundNonce! + 1 : job.startNonce,
+          'startNonce': job.lastTriedNonce > job.startNonce ? job.lastTriedNonce : job.startNonce,
           'endNonce': job.endNonce,
           'progress': 0.0,
           'hashRate': 0.0,
           'remainingTime': 0.0,
           'speedMultiplier': 1.0,
+          'currentNonce': job.lastTriedNonce, // Initialize with the last tried nonce
         };
         // Initialize all loaded jobs as paused
         _pausedJobs[job.id] = true;
@@ -157,6 +158,9 @@ class _MinerAppHomeState extends State<MinerAppHome> {
         if (update.containsKey('remainingTime')) {
           job['remainingTime'] = update['remainingTime'] as double;
         }
+        if (update.containsKey('currentNonce')) {
+          job['currentNonce'] = update['currentNonce'] as int;
+        }
         
         _jobs[jobId] = job;
       }
@@ -238,6 +242,52 @@ class _MinerAppHomeState extends State<MinerAppHome> {
     }
   }
 
+  Future<void> _clearAllJobs() async {
+    // Show confirmation dialog
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Clear Mining History'),
+        content: const Text(
+          'Are you sure you want to clear all mining history? '
+          'This will stop all active mining jobs and delete all job records. '
+          'This action cannot be undone.'
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Clear All'),
+          ),
+        ],
+      ),
+    ) ?? false;
+
+    if (confirmed) {
+      // Clear all jobs
+      await _miningService.clearAllJobs();
+      
+      // Update UI
+      setState(() {
+        _jobs.clear();
+        _pausedJobs.clear();
+      });
+      
+      // Show confirmation
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Mining history cleared'),
+            backgroundColor: Colors.blue,
+          ),
+        );
+      }
+    }
+  }
+
   @override
   void dispose() {
     _miningService.dispose();
@@ -246,11 +296,18 @@ class _MinerAppHomeState extends State<MinerAppHome> {
 
   @override
   Widget build(BuildContext context) {
+    final activeJobs = _jobs.entries.toList();
+    
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: const Text('Bitcoin Miner'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.delete_sweep),
+            onPressed: _clearAllJobs,
+            tooltip: 'Clear Mining History',
+          ),
           IconButton(
             icon: const Icon(Icons.history),
             onPressed: () {
@@ -275,7 +332,7 @@ class _MinerAppHomeState extends State<MinerAppHome> {
           ),
         ],
       ),
-      body: _jobs.isEmpty
+      body: activeJobs.isEmpty
           ? const Center(
               child: Text(
                 'No active mining jobs\nTap the + button to start mining',
@@ -283,20 +340,24 @@ class _MinerAppHomeState extends State<MinerAppHome> {
               ),
             )
           : ListView.builder(
-              itemCount: _jobs.length,
+              itemCount: activeJobs.length,
               itemBuilder: (context, index) {
-                final jobId = _jobs.keys.elementAt(index);
-                final job = _jobs[jobId]!;
+                final job = activeJobs[index];
+                final jobId = job.key;
+                final jobData = job.value;
+                final isPaused = _pausedJobs[jobId] ?? false;
+                
                 return MiningCard(
                   jobId: jobId,
-                  progress: job['progress'] as double,
-                  hashRate: job['hashRate'] as double,
-                  remainingTime: job['remainingTime'] as double,
-                  speedMultiplier: job['speedMultiplier'] as double,
-                  isPaused: _pausedJobs[jobId] ?? false,
+                  progress: jobData['progress'] as double? ?? 0.0,
+                  hashRate: jobData['hashRate'] as double? ?? 0.0,
+                  remainingTime: jobData['remainingTime'] as double? ?? 0.0,
+                  isPaused: isPaused,
+                  speedMultiplier: jobData['speedMultiplier'] as double? ?? 1.0,
+                  lastTriedNonce: jobData['currentNonce'] as int? ?? jobData['startNonce'] as int, 
                   onPauseResume: () => _togglePause(jobId),
-                  onSpeedChange: (value) => _updateSpeed(jobId, value),
                   onStop: () => _stopMining(jobId),
+                  onSpeedChange: (value) => _updateSpeed(jobId, value),
                 );
               },
             ),

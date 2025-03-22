@@ -8,6 +8,7 @@ class MiningCard extends StatelessWidget {
   final double remainingTime;
   final bool isPaused;
   final double speedMultiplier;
+  final int lastTriedNonce;
   final VoidCallback onPauseResume;
   final VoidCallback onStop;
   final Function(double) onSpeedChange;
@@ -20,6 +21,7 @@ class MiningCard extends StatelessWidget {
     required this.remainingTime,
     required this.isPaused,
     required this.speedMultiplier,
+    required this.lastTriedNonce,
     required this.onPauseResume,
     required this.onStop,
     required this.onSpeedChange,
@@ -124,21 +126,24 @@ class MiningCard extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  'Hash Rate: ${_formatHashRate(hashRate)}',
-                  style: const TextStyle(fontWeight: FontWeight.w500),
-                ),
-                Row(
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Speed: '),
-                    DropdownButton<double>(
+                    Text('Hash Rate: ${_formatHashRate(hashRate)}'),
+                    Text('Remaining: ${_formatDuration(remainingTime)}'),
+                    Text('Current Nonce: ${lastTriedNonce.toString()}'),
+                  ],
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text('Speed: ${speedMultiplier.toStringAsFixed(1)}x'),
+                    Slider(
                       value: speedMultiplier,
-                      items: [0.5, 1.0, 2.0, 4.0].map((speed) {
-                        return DropdownMenuItem<double>(
-                          value: speed,
-                          child: Text('${speed}x'),
-                        );
-                      }).toList(),
+                      min: 0.1,
+                      max: 2.0,
+                      divisions: 19,
+                      label: '${speedMultiplier.toStringAsFixed(1)}x',
                       onChanged: (value) {
                         if (value != null) onSpeedChange(value);
                       },
