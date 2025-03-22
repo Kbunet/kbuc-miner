@@ -393,17 +393,59 @@ class MiningService {
 
   void stopMining(String jobId) {
     final workers = _jobWorkers[jobId];
+    final job = _activeJobs[jobId];
+    final isPaused = _pausedJobs[jobId] ?? false;
 
     if (workers != null) {
-      debugPrint('Stopping mining job: $jobId');
+      debugPrint('Stopping mining job: $jobId (isPaused: $isPaused)');
+      
+      // Stop all workers
       workers.forEach((worker) {
         worker.sendPort?.send({'command': 'stop'});
         worker.isolate?.kill(priority: Isolate.immediate);
+        worker.receivePort?.close();
       });
+      
+      // Clean up worker resources
       _jobWorkers.remove(jobId);
-      _pausedJobs.remove(jobId);
       _speedMultipliers.remove(jobId);
+      _receiveStreams[jobId]?.cancel();
+      _receiveStreams.remove(jobId);
+      _hashRateHistory.remove(jobId);
+      _lastRemainingTimes.remove(jobId);
+      
+      // If the job is paused, we don't want to mark it as completed
+      // Instead, we just save its current state so it can be resumed later
+      if (isPaused && job != null) {
+        debugPrint('Job $jobId is paused, saving state without marking as completed');
+        
+        // Save the job state but don't mark it as completed
+        _lock.synchronized(() async {
+          try {
+            final storedJob = await _jobService.getJob(jobId);
+            if (storedJob != null) {
+              // Update the job with the latest nonce but don't mark as completed
+              final updatedJob = storedJob.copyWith(
+                lastTriedNonce: job.lastTriedNonce,
+              );
+              await _jobService.updateJob(updatedJob);
+              debugPrint('Saved paused state for job $jobId at nonce ${job.lastTriedNonce}');
+            }
+          } catch (e) {
+            debugPrint('Error saving paused state for job $jobId: $e');
+          }
+        });
+      } else if (job != null) {
+        // If the job is not paused, mark it as completed without a solution
+        debugPrint('Job $jobId is not paused, marking as completed without solution');
+        _completeJob(jobId, false, null, null, (update) {
+          debugPrint('Job $jobId marked as completed without solution');
+        });
+      }
+      
+      // Remove from active jobs and paused jobs
       _activeJobs.remove(jobId);
+      _pausedJobs.remove(jobId);
     }
   }
 
@@ -1197,10 +1239,16 @@ class MiningService {
 
   // Save the current state of all active jobs
   Future<void> saveJobState() async {
+    debugPrint('Saving state for all active jobs');
+    
     // For each active job, update its last tried nonce
     for (final jobId in _activeJobs.keys) {
       final job = _activeJobs[jobId];
+      final isPaused = _pausedJobs[jobId] ?? false;
+      
       if (job != null) {
+        debugPrint('Saving state for job $jobId (isPaused: $isPaused)');
+        
         // Find the highest nonce processed by any worker
         int highestNonce = job.lastTriedNonce;
         if (_jobWorkers.containsKey(jobId)) {
@@ -1211,32 +1259,47 @@ class MiningService {
           }
         }
         
-        // Create an updated job with the latest nonce
-        final updatedJob = MiningJob(
-          id: job.id,
-          content: job.content,
-          leader: job.leader,
-          owner: job.owner,
-          height: job.height,
-          rewardType: job.rewardType, // Keep as string '0' or '1'
-          difficulty: job.difficulty,
-          startNonce: job.startNonce,
-          endNonce: job.endNonce,
-          startTime: job.startTime,
-          endTime: job.endTime,
-          foundNonce: job.foundNonce,
-          foundHash: job.foundHash,
-          completed: job.completed,
-          successful: job.successful,
-          error: job.error,
-          broadcastSuccessful: job.broadcastSuccessful,
-          broadcastError: job.broadcastError,
-          broadcastHash: job.broadcastHash,
-          lastTriedNonce: highestNonce,
-        );
+        try {
+          // Get the latest job from storage
+          final storedJob = await _jobService.getJob(jobId);
+          if (storedJob != null) {
+            // Update the job with the latest nonce but preserve its completion status
+            // For paused jobs, we want to ensure they remain incomplete so they can be resumed
+            final updatedJob = storedJob.copyWith(
+              lastTriedNonce: highestNonce,
+              // If the job is paused, ensure it's not marked as completed
+              completed: isPaused ? false : storedJob.completed,
+            );
+            
+            await _jobService.updateJob(updatedJob);
+            debugPrint('Saved state for job $jobId at nonce $highestNonce');
+          }
+        } catch (e) {
+          debugPrint('Error saving state for job $jobId: $e');
+        }
+      }
+    }
+    
+    // Also save state for paused jobs that might not be in active jobs anymore
+    for (final jobId in _pausedJobs.keys) {
+      if (!_activeJobs.containsKey(jobId)) {
+        debugPrint('Saving state for paused job $jobId that is not in active jobs');
         
-        // Update the job in storage
-        await _jobService.updateJob(updatedJob);
+        try {
+          // Get the job from storage
+          final storedJob = await _jobService.getJob(jobId);
+          if (storedJob != null) {
+            // Ensure the job is not marked as completed so it can be resumed
+            final updatedJob = storedJob.copyWith(
+              completed: false,
+            );
+            
+            await _jobService.updateJob(updatedJob);
+            debugPrint('Saved state for paused job $jobId');
+          }
+        } catch (e) {
+          debugPrint('Error saving state for paused job $jobId: $e');
+        }
       }
     }
   }
