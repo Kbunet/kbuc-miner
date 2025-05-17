@@ -29,7 +29,7 @@ class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
   final _leaderController = TextEditingController();
   final _heightController = TextEditingController();
   final _jobOwnerController = TextEditingController();
-  final _difficultyController = TextEditingController(text: '4');
+  final _difficultyController = TextEditingController(text: '6');
   final _startNonceController = TextEditingController();
   final _endNonceController = TextEditingController();
   String _rewardType = '0'; // Initialize as string '0' for Reputation Points
@@ -233,7 +233,7 @@ class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
               TextFormField(
                 controller: _difficultyController,
                 decoration: const InputDecoration(
-                  labelText: 'Difficulty (0-8)',
+                  labelText: 'Difficulty (starting from 6 leading zeros)',
                   border: OutlineInputBorder(),
                 ),
                 keyboardType: TextInputType.number,
@@ -242,8 +242,8 @@ class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
                     return 'Please enter difficulty';
                   }
                   final difficulty = int.tryParse(value);
-                  if (difficulty == null || difficulty < 0 || difficulty > 8) {
-                    return 'Difficulty must be between 0 and 8';
+                  if (difficulty == null || difficulty < 6) {
+                    return 'Difficulty must be >= 6';
                   }
                   return null;
                 },
