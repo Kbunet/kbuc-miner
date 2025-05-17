@@ -8,9 +8,11 @@ plugins {
 android {
     namespace = "com.example.miner_app"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    ndkVersion = "27.0.12077973" // Updated to match device_info_plus requirement
 
     compileOptions {
+        // Enable core library desugaring for flutter_local_notifications
+        coreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
@@ -41,4 +43,9 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Add core library desugaring dependency with updated version
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:1.2.2'
 }

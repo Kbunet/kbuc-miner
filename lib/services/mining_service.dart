@@ -1199,6 +1199,20 @@ class MiningService {
   Future<List<MiningJob>> getAllJobs() => _jobService.getAllJobs();
 
   Future<void> updateJob(MiningJob job) => _jobService.updateJob(job);
+  
+  // Get job statistics for a specific job ID
+  Map<String, dynamic> getJobStats(String jobId) {
+    if (_jobStats.containsKey(jobId)) {
+      return Map<String, dynamic>.from(_jobStats[jobId]!);
+    }
+    return {
+      'progress': 0.0,
+      'hashRate': 0.0,
+      'remainingTime': 0.0,
+      'activeWorkers': 0,
+      'currentNonce': 0,
+    };
+  }
 
   Future<void> reBroadcastTicket(String jobId) async {
     final job = await _jobService.getJob(jobId);

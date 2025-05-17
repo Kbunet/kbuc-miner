@@ -1,11 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:miner_app/services/mining_service.dart';
+import 'package:miner_app/services/background_service.dart';
 import 'package:miner_app/widgets/create_mining_job_dialog.dart';
 import 'package:miner_app/widgets/mining_card.dart';
 import 'package:miner_app/screens/settings_screen.dart';
 import 'package:miner_app/screens/history_screen.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:workmanager/workmanager.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Initialize background service
+  final backgroundService = BackgroundMiningService();
+  await backgroundService.init();
+  
   runApp(const MinerApp());
 }
 
@@ -41,6 +50,12 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
   
   // Service for mining operations
   final MiningService _miningService = MiningService();
+  
+  // Background service for background processing
+  final BackgroundMiningService _backgroundService = BackgroundMiningService();
+  
+  // Track if background service is running
+  bool _isBackgroundServiceRunning = false;
 
   @override
   void initState() {
@@ -53,6 +68,12 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
     // Listen to job updates from the mining service
     _miningService.jobUpdates.listen(_handleStreamUpdate);
     _miningService.jobCompleted.listen(_handleJobCompleted);
+    
+    // Check background service status
+    _checkBackgroundServiceStatus();
+    
+    // Request necessary permissions
+    _requestPermissions();
   }
   
   // Handle updates from the mining service stream
@@ -217,6 +238,11 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
       _jobs.remove(jobId);
       _pausedJobs.remove(jobId);
     });
+    
+    // If no more jobs, stop background service
+    if (_jobs.isEmpty && _isBackgroundServiceRunning) {
+      _stopBackgroundService();
+    }
   }
 
   void _togglePause(String jobId) {
@@ -437,6 +463,11 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
             endNonce: endNonce,
             onUpdate: (_) {}, // Empty callback as we're using streams now
           );
+          
+          // If this is the first job, start background service
+          if (_jobs.length == 1) {
+            _startBackgroundService();
+          }
         },
       ),
     );
@@ -504,12 +535,65 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
         state == AppLifecycleState.inactive || 
         state == AppLifecycleState.detached) {
       _saveJobState();
+      
+      // Start background service if we have active jobs
+      if (_jobs.isNotEmpty && !_isBackgroundServiceRunning) {
+        _startBackgroundService();
+      }
+    } else if (state == AppLifecycleState.resumed) {
+      // Check background service status when app is resumed
+      _checkBackgroundServiceStatus();
     }
   }
   
   // Save the current state of all active jobs
   Future<void> _saveJobState() async {
     await _miningService.saveJobState();
+  }
+  
+  // Request necessary permissions
+  Future<void> _requestPermissions() async {
+    await Permission.notification.request();
+    await Permission.ignoreBatteryOptimizations.request();
+  }
+  
+  // Check background service status
+  Future<void> _checkBackgroundServiceStatus() async {
+    _isBackgroundServiceRunning = await _backgroundService.isServiceRunning();
+  }
+  
+  // Start background service
+  Future<void> _startBackgroundService() async {
+    if (!_isBackgroundServiceRunning && _jobs.isNotEmpty) {
+      final started = await _backgroundService.startService();
+      if (started) {
+        setState(() {
+          _isBackgroundServiceRunning = true;
+        });
+        
+        // With Workmanager, we don't need to explicitly send job data
+        // The background task will read the latest state from MiningService
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Background mining enabled'),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+  
+  // Stop background service
+  Future<void> _stopBackgroundService() async {
+    if (_isBackgroundServiceRunning) {
+      final stopped = await _backgroundService.stopService();
+      if (stopped) {
+        setState(() {
+          _isBackgroundServiceRunning = false;
+        });
+      }
+    }
   }
 
   @override
@@ -578,9 +662,29 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
                 );
               },
             ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _showCreateMiningJobDialog,
-        child: const Icon(Icons.add),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Background service toggle button
+          if (_jobs.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 16.0),
+              child: FloatingActionButton.small(
+                onPressed: _isBackgroundServiceRunning 
+                  ? _stopBackgroundService 
+                  : _startBackgroundService,
+                backgroundColor: _isBackgroundServiceRunning ? Colors.green : Colors.grey,
+                child: Icon(_isBackgroundServiceRunning 
+                  ? Icons.notifications_active 
+                  : Icons.notifications_off),
+              ),
+            ),
+          // Add new mining job button
+          FloatingActionButton(
+            onPressed: _showCreateMiningJobDialog,
+            child: const Icon(Icons.add),
+          ),
+        ],
       ),
     );
   }
