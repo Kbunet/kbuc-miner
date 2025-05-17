@@ -600,7 +600,7 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Miner App'),
+        title: const Text('KBUC Miner'),
         actions: [
           IconButton(
             icon: const Icon(Icons.history),

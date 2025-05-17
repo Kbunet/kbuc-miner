@@ -41,8 +41,8 @@ class MiningCard extends StatefulWidget {
 
 class _MiningCardState extends State<MiningCard> {
   double _speedMultiplier = 1.0;
-  bool _isDetailsExpanded = true; // Track if details are expanded
-  bool _isWorkersExpanded = true; // Track if worker details are expanded
+  bool _isDetailsExpanded = true;
+  bool _isWorkersExpanded = true;
   
   @override
   void initState() {
@@ -179,7 +179,7 @@ class _MiningCardState extends State<MiningCard> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  'Nonce: $lastTriedNonce',
+                  'Progress: $completionPercentage%',
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
                 Text(
@@ -229,32 +229,11 @@ class _MiningCardState extends State<MiningCard> {
                       Expanded(
                         child: _buildStatItem('Current Nonce', '$lastTriedNonce'),
                       ),
-                      if (hasEndNonce)
-                        Expanded(
-                          child: _buildStatItem('Est. Time', _formatDuration(remainingTime)),
-                        ),
+                      Expanded(
+                        child: _buildStatItem('Est. Time', _formatDuration(remainingTime)),
+                      ),
                     ],
                   ),
-                  
-                  // Progress info (only if end nonce is set)
-                  if (hasEndNonce) ...[  
-                    const SizedBox(height: 12.0),
-                    Row(
-                      children: [
-                        Text('Progress: $completionPercentage%'),
-                        const SizedBox(width: 8.0),
-                        Expanded(
-                          child: LinearProgressIndicator(
-                            value: progress,
-                            backgroundColor: Colors.grey.shade200,
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              widget.isPaused ? Colors.orange : Colors.blue,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
                   const SizedBox(height: 16.0),
                   
                   // Speed control
@@ -290,8 +269,6 @@ class _MiningCardState extends State<MiningCard> {
                     Text('Height: ${widget.job!.height}'),
                     const SizedBox(height: 8.0),
                     Text('Difficulty: ${widget.job!.difficulty}'),
-                    const SizedBox(height: 8.0),
-                    Text('Reward Type: ${widget.job!.rewardType == "1" ? "Coins" : "Reputation Points"}'),
                     if (hasEndNonce) ...[
                       const SizedBox(height: 8.0),
                       Text('Range: ${widget.job!.startNonce} - ${widget.job!.endNonce}'),

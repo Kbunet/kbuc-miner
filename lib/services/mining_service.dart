@@ -359,7 +359,7 @@ class MiningService {
       return;
     }
     
-    debugPrint('Assigned new batch to worker $workerId for job $jobId: $newStart to $newEnd (within sequential batch: ${job.startNonce} to ${_currentBatchEnd[jobId]})');
+    // debugPrint('Assigned new batch to worker $workerId for job $jobId: $newStart to $newEnd (within sequential batch: ${job.startNonce} to ${_currentBatchEnd[jobId]})');
     
     // Update the worker
     _jobWorkers[jobId]![workerIndex] = worker.copyWith(
