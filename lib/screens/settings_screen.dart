@@ -77,7 +77,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                'Bitcoin Node Connection',
+                'Kbunet Node Connection',
                 style: TextStyle(
                   fontSize: 20,
                   fontWeight: FontWeight.bold,
@@ -87,7 +87,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               TextFormField(
                 decoration: const InputDecoration(
                   labelText: 'Host',
-                  helperText: 'e.g., localhost or node.example.com',
+                  helperText: 'e.g., localhost or rpc.kbunet.net',
                   border: OutlineInputBorder(),
                 ),
                 initialValue: _settings.host,
@@ -97,13 +97,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   }
                   return null;
                 },
-                onSaved: (value) => _settings.host = value ?? 'localhost',
+                onSaved: (value) => _settings.host = value ?? 'rpc.kbunet.net',
               ),
               const SizedBox(height: 16),
               TextFormField(
                 decoration: const InputDecoration(
                   labelText: 'Port',
-                  helperText: 'Default: 8332',
+                  helperText: 'Default: 443',
                   border: OutlineInputBorder(),
                 ),
                 initialValue: _settings.port.toString(),
@@ -118,7 +118,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   }
                   return null;
                 },
-                onSaved: (value) => _settings.port = int.tryParse(value ?? '') ?? 8332,
+                onSaved: (value) => _settings.port = int.tryParse(value ?? '') ?? 443,
               ),
               const SizedBox(height: 16),
               TextFormField(
@@ -158,7 +158,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 value: _settings.useSSL,
                 onChanged: (value) {
                   setState(() {
-                    _settings.useSSL = value;
+                    _settings.useSSL = value ?? true;
                   });
                 },
               ),
@@ -201,7 +201,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   border: OutlineInputBorder(),
                 ),
                 initialValue: _settings.defaultTicketOwner,
-                onSaved: (value) => _settings.defaultTicketOwner = value ?? '',
+                onSaved: (value) => _settings.defaultTicketOwner = value ?? '61be48c9fd9378c47f3567af09b8c1b7c31825c4',
               ),
               const SizedBox(height: 16),
               Row(

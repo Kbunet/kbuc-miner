@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.miner_app"
+    namespace = "net.kbunet.miner"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = "27.0.12077973" // Updated to match device_info_plus requirement
 
@@ -16,14 +16,20 @@ android {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
-
+    
     kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_1_8
+        jvmTarget = '1.8'
+    }
+    
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
     }
 
+
+
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.miner_app"
+        // Updated with custom application ID
+        applicationId = "net.kbunet.miner"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
