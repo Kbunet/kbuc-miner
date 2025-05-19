@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:miner_app/services/mining_service.dart';
 import 'package:miner_app/services/background_service.dart';
+import 'package:miner_app/services/notification_service.dart';
 import 'package:miner_app/widgets/create_mining_job_dialog.dart';
 import 'package:miner_app/widgets/mining_card.dart';
 import 'package:miner_app/screens/settings_screen.dart';
@@ -11,9 +12,37 @@ import 'package:workmanager/workmanager.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
+  // Initialize notification service
+  final notificationService = NotificationService();
+  await notificationService.init();
+  
+  // Initialize Workmanager with custom configuration
+  await Workmanager().initialize(
+    callbackDispatcher,
+    isInDebugMode: false, // Set to false to reduce debug notifications
+  );
+  
+  // Register periodic task for background mining
+  await Workmanager().registerPeriodicTask(
+    'background-mining-task',
+    kBackgroundMiningTask,
+    frequency: const Duration(minutes: 15),
+    constraints: Constraints(
+      networkType: NetworkType.not_required,
+      requiresBatteryNotLow: false,
+      requiresCharging: false,
+      requiresDeviceIdle: false,
+      requiresStorageNotLow: false,
+    ),
+    existingWorkPolicy: ExistingWorkPolicy.replace,
+  );
+  
   // Initialize background service
   final backgroundService = BackgroundMiningService();
   await backgroundService.init();
+  
+  // Request notification permission
+  await Permission.notification.request();
   
   runApp(const MinerApp());
 }
@@ -141,42 +170,54 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
     });
   }
   
-  // Handle job completed event
+  // Handle job completion events
   void _handleJobCompleted(Map<String, dynamic> update) {
     if (!mounted) return;
     
-    final jobId = update['jobId'] as String;
-    final status = update['status'] as String?;
+    // Debug log the entire update map
+    debugPrint('Job completion update received:');
+    update.forEach((key, value) {
+      debugPrint('  $key: $value (${value?.runtimeType})'); 
+    });
     
-    // Check if we have a solution found
-    if (status == 'found' || update.containsKey('nonce')) {
-      // Show a success notification
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Solution found for job $jobId!'),
-          backgroundColor: Colors.green,
-        ),
-      );
-      
-      // Remove the job from the active jobs list in the UI
-      setState(() {
-        _jobs.remove(jobId);
-        _pausedJobs.remove(jobId);
-      });
-    } else if (status == 'completed') {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Job $jobId completed without finding solution'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-      
-      // Remove the job from the active jobs list in the UI
-      setState(() {
-        _jobs.remove(jobId);
-        _pausedJobs.remove(jobId);
-      });
-    }
+    final jobId = update['jobId'] as String;
+    final String status = update['status'] as String? ?? 'completed';
+    final dynamic foundNonce = update['foundNonce'];
+    final String? foundHash = update['foundHash'] as String?;
+    
+    // Determine if the job was successful based on the status
+    final bool successful = status == 'found';
+    debugPrint('Job completion status: $status, successful: $successful');
+    
+    // Remove job from active jobs
+    setState(() {
+      _jobs.remove(jobId);
+      _pausedJobs.remove(jobId);
+    });
+    
+    // Show a snackbar with the result
+    final message = successful
+        ? 'Mining job $jobId completed successfully! Found nonce: ${foundNonce?.toString() ?? 'unknown'}'
+        : 'Mining job $jobId completed without finding a solution';
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: successful ? Colors.green : Colors.orange,
+        duration: const Duration(seconds: 5),
+      ),
+    );
+    
+    // Show notification
+    NotificationService().showJobCompletionNotification(
+      jobId: jobId,
+      successful: successful,
+      foundNonce: foundNonce?.toString(),
+      foundHash: foundHash,
+    );
+    
+    // Save the job state
+    _saveJobState();
   }
 
   Future<void> _loadActiveJobs() async {
@@ -219,7 +260,7 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
           leader: _jobs[jobId]!['leader'] as String,
           owner: _jobs[jobId]!['owner'] as String,
           height: _jobs[jobId]!['height'] as int,
-          rewardType: _jobs[jobId]!['rewardType'] as String, // Pass as string '0' or '1'
+          rewardType: _jobs[jobId]!['rewardType'] as String, // Pass as string '0' or '1' per memory requirement
           difficulty: _jobs[jobId]!['difficulty'] as int,
           startNonce: _jobs[jobId]!['startNonce'] as int,
           endNonce: _jobs[jobId]!['endNonce'] as int,
@@ -306,66 +347,119 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
       if (!mounted) return;
       
       final jobId = update['jobId'] as String;
+      final status = update['status'] as String?;
       
-      // Check if this job is still in our list
-      if (!_jobs.containsKey(jobId)) {
-        // If not, we might need to add it (for newly created jobs)
-        if (update['status'] == 'running' || update['status'] == 'paused') {
-          // We'll add it to our tracking
+      // Handle different update types
+      switch (status) {
+        case 'progress':
+          // Update job progress
           setState(() {
-            _jobs[jobId] = {
-              'progress': _safeDoubleValue(update['progress']),
-              'hashRate': _safeDoubleValue(update['hashRate']),
-              'remainingTime': _safeDoubleValue(update['remainingTime']),
-              'currentNonce': update['currentNonce'] as int? ?? 0,
-              'speedMultiplier': 1.0,
-              'activeWorkers': _miningService.getActiveWorkerCount(jobId),
-              'workerDetails': update['workerDetails'] != null 
-                ? (update['workerDetails'] as List).cast<Map<String, dynamic>>() 
-                : <Map<String, dynamic>>[],
-            };
-            _pausedJobs[jobId] = update['isPaused'] as bool? ?? false;
+            if (!_jobs.containsKey(jobId)) {
+              // Add new job if it doesn't exist yet
+              _jobs[jobId] = {
+                'progress': _safeDoubleValue(update['progress']),
+                'hashRate': _safeDoubleValue(update['hashRate']),
+                'remainingTime': _safeDoubleValue(update['remainingTime']),
+                'currentNonce': update['currentNonce'] as int? ?? 0,
+                'speedMultiplier': 1.0,
+                'activeWorkers': update['activeWorkers'] as int? ?? 0,
+                'workerDetails': update['workerDetails'] != null 
+                  ? (update['workerDetails'] as List).cast<Map<String, dynamic>>() 
+                  : <Map<String, dynamic>>[],
+              };
+              _pausedJobs[jobId] = false;
+            } else {
+              // Update existing job
+              final job = _jobs[jobId]!;
+              job['progress'] = _safeDoubleValue(update['progress']);
+              job['hashRate'] = _safeDoubleValue(update['hashRate']);
+              job['remainingTime'] = _safeDoubleValue(update['remainingTime']);
+              job['currentNonce'] = update['currentNonce'] as int? ?? job['currentNonce'] as int? ?? 0;
+              job['activeWorkers'] = update['activeWorkers'] as int? ?? job['activeWorkers'] as int? ?? 0;
+              
+              if (update['workerDetails'] != null) {
+                job['workerDetails'] = (update['workerDetails'] as List).cast<Map<String, dynamic>>();
+              }
+              
+              // Show progress notification at significant milestones (25%, 50%, 75%)
+              final double progress = _safeDoubleValue(update['progress']);
+              final int progressPercent = (progress * 100).round();
+              
+              // Only show progress notifications at significant milestones
+              if (progressPercent % 25 == 0 && progressPercent > 0 && progressPercent < 100 && _isBackgroundServiceRunning) {
+                // Schedule a notification for progress milestone
+                Workmanager().registerOneOffTask(
+                  'progress-notification-$jobId-$progressPercent',
+                  kCompletionNotificationTask,
+                  inputData: {
+                    'title': 'Mining Progress: $progressPercent%',
+                    'message': 'Job $jobId is $progressPercent% complete with hash rate ${job['hashRate'].toStringAsFixed(2)} H/s',
+                  },
+                  initialDelay: const Duration(seconds: 1),
+                  existingWorkPolicy: ExistingWorkPolicy.keep,
+                );
+              }
+            }
           });
-        }
-        return;
+          break;
+        case 'found':
+          // Solution found
+          // Show a success notification (in-app)
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Solution found for job $jobId!'),
+              backgroundColor: Colors.green,
+            ),
+          );
+          
+          // Schedule a notification task for solution found
+          Workmanager().registerOneOffTask(
+            'completion-notification-${DateTime.now().millisecondsSinceEpoch}',
+            kCompletionNotificationTask,
+            inputData: {
+              'title': 'Solution Found!',
+              'message': 'Solution found for job $jobId!',
+            },
+            initialDelay: const Duration(seconds: 1),
+          );
+          
+          // Remove job from active jobs
+          setState(() {
+            _jobs.remove(jobId);
+            _pausedJobs.remove(jobId);
+          });
+          break;
+        case 'completed':
+          // Show in-app notification
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Job $jobId completed without finding solution'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+          
+          // Schedule a notification task for completion
+          Workmanager().registerOneOffTask(
+            'completion-notification-${DateTime.now().millisecondsSinceEpoch}',
+            kCompletionNotificationTask,
+            inputData: {
+              'title': 'Mining Job Completed',
+              'message': 'Job $jobId completed without finding a solution',
+            },
+            initialDelay: const Duration(seconds: 1),
+          );
+          
+          // Remove job from active jobs
+          setState(() {
+            _jobs.remove(jobId);
+            _pausedJobs.remove(jobId);
+          });
+          break;
       }
-      
-      setState(() {
-        // Get the existing job data
-        final job = Map<String, dynamic>.from(_jobs[jobId]!);
-        
-        // Update job properties from the update
-        if (update.containsKey('progress')) {
-          job['progress'] = _safeDoubleValue(update['progress']);
-        }
-        if (update.containsKey('hashRate')) {
-          job['hashRate'] = _safeDoubleValue(update['hashRate']);
-        }
-        if (update.containsKey('remainingTime')) {
-          job['remainingTime'] = _safeDoubleValue(update['remainingTime']);
-        }
-        if (update.containsKey('currentNonce')) {
-          job['currentNonce'] = update['currentNonce'] as int;
-        }
-        
-        // Update the active workers count
-        job['activeWorkers'] = _miningService.getActiveWorkerCount(jobId);
-        
-        if (update.containsKey('workerDetails')) {
-          job['workerDetails'] = update['workerDetails'] != null 
-            ? (update['workerDetails'] as List).cast<Map<String, dynamic>>() 
-            : <Map<String, dynamic>>[];
-        }
-        
-        _jobs[jobId] = job;
-      });
       
       // Make sure UI pause state matches the mining service state
       if (update.containsKey('isPaused')) {
         _pausedJobs[jobId] = update['isPaused'] as bool;
-      }
-
-      if (update['status'] == 'found') {
         // Show a success notification
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -553,7 +647,9 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
   
   // Request necessary permissions
   Future<void> _requestPermissions() async {
-    await Permission.notification.request();
+    // Request notification permission
+    final notificationStatus = await Permission.notification.request();
+    debugPrint('Notification permission status: $notificationStatus');
     await Permission.ignoreBatteryOptimizations.request();
   }
   
@@ -564,20 +660,18 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
   
   // Start background service
   Future<void> _startBackgroundService() async {
-    if (!_isBackgroundServiceRunning && _jobs.isNotEmpty) {
+    if (!_isBackgroundServiceRunning) {
       final started = await _backgroundService.startService();
       if (started) {
         setState(() {
           _isBackgroundServiceRunning = true;
         });
         
-        // With Workmanager, we don't need to explicitly send job data
         // The background task will read the latest state from MiningService
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Background mining enabled'),
             backgroundColor: Colors.green,
-            duration: Duration(seconds: 2),
           ),
         );
       }

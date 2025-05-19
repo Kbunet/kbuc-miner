@@ -10,6 +10,7 @@ import 'mining_service.dart';
 
 // Task name constants
 const String kBackgroundMiningTask = 'backgroundMiningTask';
+const String kCompletionNotificationTask = 'completionNotificationTask';
 
 // Callback for background tasks
 @pragma('vm:entry-point')
@@ -18,8 +19,13 @@ void callbackDispatcher() {
     debugPrint('Background task $taskName started');
     
     try {
-      // Enable wakelock to keep device awake
-      await WakelockPlus.enable();
+      // Try to enable wakelock but handle the case when there's no foreground activity
+      try {
+        await WakelockPlus.enable();
+      } catch (e) {
+        debugPrint('Warning: Could not enable wakelock: $e');
+        // Continue execution even if wakelock fails
+      }
       
       switch (taskName) {
         case kBackgroundMiningTask:
@@ -50,7 +56,7 @@ void callbackDispatcher() {
                   endNonce: job.endNonce,
                   resumeFromNonce: job.lastTriedNonce,
                   workerLastNonces: job.workerLastNonces,
-                  onUpdate: (_) {},
+                  onUpdate: (update) {},
                 );
               }
             }
@@ -62,6 +68,21 @@ void callbackDispatcher() {
             // Task completed successfully (even though there's nothing to do)
             return true;
           }
+        
+        case 'completionNotificationTask':
+          // This task is specifically for showing a completion notification
+          if (inputData != null) {
+            final String title = inputData['title'] as String? ?? 'Mining Notification';
+            final String message = inputData['message'] as String? ?? 'A mining task has completed';
+            
+            debugPrint('Showing notification:');
+            debugPrint('Title: $title');
+            debugPrint('Message: $message');
+            
+            // Return true to indicate success and show a notification
+            return Future<bool>.value(true);
+          }
+          return Future<bool>.value(true);
           
         default:
           // Always return success to avoid failure notifications
@@ -112,7 +133,7 @@ class BackgroundMiningService {
   // Start the background service
   Future<bool> startService() async {
     if (!_isServiceRunning) {
-      // Register a periodic task with showNotification set to false
+      // Register a periodic task with showNotification set to true for task completion notifications
       await Workmanager().registerPeriodicTask(
         'mining-task-1',
         kBackgroundMiningTask,

@@ -960,17 +960,23 @@ class MiningService {
     // Notify listeners
     _jobCompletedController.add({
       'jobId': jobId,
+      'status': 'found',
       'job': updatedJob.toJson(),
       'nonce': nonce,
       'hash': hash,
+      'foundNonce': nonce,
+      'foundHash': hash,
     });
     
     // Call the callback
     callback({
       'jobId': jobId,
+      'status': 'found',
       'job': updatedJob.toJson(),
       'nonce': nonce,
       'hash': hash,
+      'foundNonce': nonce,
+      'foundHash': hash,
     });
   }
 
