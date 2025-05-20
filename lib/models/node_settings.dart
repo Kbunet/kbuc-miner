@@ -11,11 +11,11 @@ class NodeSettings {
   int cpuCores;
 
   NodeSettings({
-    this.host = 'localhost',
-    this.port = 8332,
+    this.host = 'rpc.kbunet.net',
+    this.port = 443,
     this.username = '',
     this.password = '',
-    this.useSSL = false,
+    this.useSSL = true,
     this.defaultTicketOwner = '',
     this.cpuCores = 1,
   });
@@ -58,11 +58,11 @@ class NodeSettings {
       final actualCores = savedCores > maxCores ? maxCores : savedCores;
       
       return NodeSettings(
-        host: prefs.getString('node_host') ?? 'localhost',
-        port: prefs.getInt('node_port') ?? 8332,
+        host: prefs.getString('node_host') ?? 'rpc.kbunet.net',
+        port: prefs.getInt('node_port') ?? 443,
         username: prefs.getString('node_username') ?? '',
         password: prefs.getString('node_password') ?? '',
-        useSSL: prefs.getBool('node_use_ssl') ?? false,
+        useSSL: prefs.getBool('node_use_ssl') ?? true,
         defaultTicketOwner: prefs.getString('default_ticket_owner') ?? '',
         cpuCores: actualCores,
       );

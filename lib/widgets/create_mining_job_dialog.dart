@@ -38,6 +38,8 @@ class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
   void initState() {
     super.initState();
     _loadDefaultOwner();
+    // Automatically fetch leader information when the dialog opens
+    _fetchLeaderInfo();
   }
 
   Future<void> _loadDefaultOwner() async {
