@@ -6,6 +6,7 @@ import 'package:miner_app/widgets/create_mining_job_dialog.dart';
 import 'package:miner_app/widgets/mining_card.dart';
 import 'package:miner_app/screens/settings_screen.dart';
 import 'package:miner_app/screens/history_screen.dart';
+import 'package:miner_app/models/node_settings.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:workmanager/workmanager.dart';
 
@@ -224,6 +225,10 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
     try {
       final activeJobs = await _miningService.getActiveJobs();
       
+      // Load settings to check if auto-start is enabled
+      final settings = await NodeSettings.load();
+      final autoStartEnabled = settings.autoStartJobs;
+      
       setState(() {
         for (final job in activeJobs) {
           // Get the number of active workers for this job
@@ -252,20 +257,30 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
         }
       });
       
-      // Start listening for updates for each job
-      for (final jobId in _jobs.keys) {
-        _miningService.startMining(
-          jobId: jobId,
-          content: _jobs[jobId]!['content'] as String,
-          leader: _jobs[jobId]!['leader'] as String,
-          owner: _jobs[jobId]!['owner'] as String,
-          height: _jobs[jobId]!['height'] as int,
-          rewardType: _jobs[jobId]!['rewardType'] as String, // Pass as string '0' or '1' per memory requirement
-          difficulty: _jobs[jobId]!['difficulty'] as int,
-          startNonce: _jobs[jobId]!['startNonce'] as int,
-          endNonce: _jobs[jobId]!['endNonce'] as int,
-          onUpdate: (_) {}, // Empty callback as we're using streams now
-        );
+      // Only start mining jobs if auto-start is enabled
+      if (autoStartEnabled) {
+        debugPrint('Auto-start enabled, resuming ${_jobs.length} mining jobs');
+        // Start listening for updates for each job
+        for (final jobId in _jobs.keys) {
+          _miningService.startMining(
+            jobId: jobId,
+            content: _jobs[jobId]!['content'] as String,
+            leader: _jobs[jobId]!['leader'] as String,
+            owner: _jobs[jobId]!['owner'] as String,
+            height: _jobs[jobId]!['height'] as int,
+            rewardType: _jobs[jobId]!['rewardType'] as String, // Pass as string '0' or '1' per memory requirement
+            difficulty: _jobs[jobId]!['difficulty'] as int,
+            startNonce: _jobs[jobId]!['startNonce'] as int,
+            endNonce: _jobs[jobId]!['endNonce'] as int,
+            onUpdate: (_) {}, // Empty callback as we're using streams now
+          );
+        }
+      } else {
+        debugPrint('Auto-start disabled, loaded ${_jobs.length} mining jobs without starting them');
+        // Mark all jobs as paused since we're not starting them
+        for (final jobId in _jobs.keys) {
+          _pausedJobs[jobId] = true;
+        }
       }
     } catch (e) {
       debugPrint('Error loading active jobs: $e');

@@ -9,6 +9,7 @@ class NodeSettings {
   bool useSSL;
   String defaultTicketOwner;
   int cpuCores;
+  bool autoStartJobs; // Whether to automatically start mining jobs when the app opens
 
   NodeSettings({
     this.host = 'rpc.kbunet.net',
@@ -18,6 +19,7 @@ class NodeSettings {
     this.useSSL = true,
     this.defaultTicketOwner = '',
     this.cpuCores = 1,
+    this.autoStartJobs = false, // Default to not auto-starting jobs
   });
 
   // Get the maximum number of available CPU cores
@@ -41,6 +43,7 @@ class NodeSettings {
         prefs.setBool('node_use_ssl', useSSL),
         prefs.setString('default_ticket_owner', defaultTicketOwner),
         prefs.setInt('cpu_cores', cpuCores),
+        prefs.setBool('auto_start_jobs', autoStartJobs),
       ]);
     } catch (e) {
       // Handle any potential storage errors
@@ -65,6 +68,7 @@ class NodeSettings {
         useSSL: prefs.getBool('node_use_ssl') ?? true,
         defaultTicketOwner: prefs.getString('default_ticket_owner') ?? '',
         cpuCores: actualCores,
+        autoStartJobs: prefs.getBool('auto_start_jobs') ?? false, // Default to not auto-starting jobs
       );
     } catch (e) {
       // Return default settings if there's an error

@@ -237,6 +237,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   color: Colors.grey,
                 ),
               ),
+              const SizedBox(height: 24),
+              const Text(
+                'Application Behavior',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 16),
+              SwitchListTile(
+                title: const Text('Auto-start Mining Jobs'),
+                subtitle: const Text('Automatically resume mining jobs when the app opens'),
+                value: _settings.autoStartJobs,
+                onChanged: (value) {
+                  setState(() {
+                    _settings.autoStartJobs = value;
+                  });
+                },
+              ),
             ],
           ),
         ),
