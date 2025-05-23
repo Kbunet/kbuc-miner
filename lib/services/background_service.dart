@@ -11,6 +11,7 @@ import 'mining_service.dart';
 // Task name constants
 const String kBackgroundMiningTask = 'backgroundMiningTask';
 const String kCompletionNotificationTask = 'completionNotificationTask';
+const String kForegroundServiceTask = 'foregroundServiceTask';
 
 // Callback for background tasks
 @pragma('vm:entry-point')
@@ -28,6 +29,13 @@ void callbackDispatcher() {
       }
       
       switch (taskName) {
+        case kForegroundServiceTask:
+          // This task runs as a foreground service with a persistent notification
+          debugPrint('Starting foreground mining service');
+          
+          // Return true to indicate the task should run as a foreground service
+          return true;
+          
         case kBackgroundMiningTask:
           // Get mining service instance
           final miningService = MiningService();
@@ -126,20 +134,76 @@ class BackgroundMiningService {
       await Permission.notification.request();
       
       // Request ignore battery optimizations
-      await Permission.ignoreBatteryOptimizations.request();
+      final batteryOptStatus = await Permission.ignoreBatteryOptimizations.request();
+      debugPrint('Battery optimization permission status: $batteryOptStatus');
+      
+      // Request foreground service permission for Android 9+
+      if (Platform.isAndroid) {
+        final deviceInfo = DeviceInfoPlugin();
+        final androidInfo = await deviceInfo.androidInfo;
+        
+        if (androidInfo.version.sdkInt >= 28) { // Android 9 (Pie) or higher
+          final foregroundStatus = await Permission.systemAlertWindow.request();
+          debugPrint('Foreground service permission status: $foregroundStatus');
+        }
+      }
     }
   }
 
   // Start the background service
   Future<bool> startService() async {
     if (!_isServiceRunning) {
-      // Register a periodic task with showNotification set to true for task completion notifications
+      // Request battery optimization exemption on real devices
+      if (Platform.isAndroid) {
+        final deviceInfo = DeviceInfoPlugin();
+        final androidInfo = await deviceInfo.androidInfo;
+        
+        // Check if this is a real device
+        final isRealDevice = androidInfo.isPhysicalDevice;
+        
+        if (isRealDevice) {
+          debugPrint('Running on a real device, requesting battery optimization exemption');
+          final hasPermission = await Permission.ignoreBatteryOptimizations.isGranted;
+          
+          if (!hasPermission) {
+            debugPrint('Requesting ignore battery optimizations permission');
+            final status = await Permission.ignoreBatteryOptimizations.request();
+            debugPrint('Ignore battery optimizations permission status: $status');
+          }
+        }
+      }
+      
+      // First, register a foreground service task that will keep the app running
+      // This is critical for real devices to prevent the OS from killing the app
+      await Workmanager().registerOneOffTask(
+        'foreground-service-task',
+        kForegroundServiceTask,
+        existingWorkPolicy: ExistingWorkPolicy.replace,
+        inputData: {
+          'title': 'KBUC Miner Running',
+          'message': 'Mining in progress',
+        },
+        constraints: Constraints(
+          networkType: NetworkType.not_required,
+          requiresBatteryNotLow: false,
+          requiresCharging: false,
+          requiresDeviceIdle: false,
+          requiresStorageNotLow: false,
+        ),
+        // This is critical - it tells Workmanager to run this as a foreground service
+        // with a persistent notification
+        options: WorkManagerOptions(
+          foreground: true,
+        ),
+      );
+      
+      // Register a periodic task with more frequent checks for real devices
       await Workmanager().registerPeriodicTask(
-        'mining-task-1',
+        'mining-task-periodic',
         kBackgroundMiningTask,
         frequency: const Duration(minutes: 15),
         constraints: Constraints(
-          networkType: NetworkType.connected,
+          networkType: NetworkType.not_required, // Don't require network connection
           requiresBatteryNotLow: false,
           requiresCharging: false,
           requiresDeviceIdle: false,
@@ -150,24 +214,32 @@ class BackgroundMiningService {
         backoffPolicyDelay: const Duration(minutes: 1),
       );
       
-      // Also register a one-time task to start immediately
-      await Workmanager().registerOneOffTask(
-        'mining-task-immediate',
-        kBackgroundMiningTask,
-        constraints: Constraints(
-          networkType: NetworkType.connected,
-          requiresBatteryNotLow: false,
-          requiresCharging: false,
-          requiresDeviceIdle: false,
-          requiresStorageNotLow: false,
-        ),
-        existingWorkPolicy: ExistingWorkPolicy.replace,
-      );
+      // Register multiple one-time tasks with different delays to ensure execution
+      for (int i = 0; i < 3; i++) {
+        await Workmanager().registerOneOffTask(
+          'mining-task-immediate-$i',
+          kBackgroundMiningTask,
+          initialDelay: Duration(minutes: i * 2), // Stagger the tasks with shorter intervals
+          constraints: Constraints(
+            networkType: NetworkType.not_required, // Don't require network connection
+            requiresBatteryNotLow: false,
+            requiresCharging: false,
+            requiresDeviceIdle: false,
+            requiresStorageNotLow: false,
+          ),
+          existingWorkPolicy: ExistingWorkPolicy.keep,
+        );
+      }
       
       _isServiceRunning = true;
       
       // Enable wakelock to keep screen on
-      await WakelockPlus.enable();
+      try {
+        await WakelockPlus.enable();
+      } catch (e) {
+        debugPrint('Warning: Could not enable wakelock: $e');
+        // Continue execution even if wakelock fails
+      }
       
       return true;
     }
