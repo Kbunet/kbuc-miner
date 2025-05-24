@@ -7,7 +7,6 @@ class NodeSettings {
   String username;
   String password;
   bool useSSL;
-  String defaultTicketOwner;
   int cpuCores;
   bool autoStartJobs; // Whether to automatically start mining jobs when the app opens
 
@@ -17,7 +16,6 @@ class NodeSettings {
     this.username = '',
     this.password = '',
     this.useSSL = true,
-    this.defaultTicketOwner = '',
     this.cpuCores = 1,
     this.autoStartJobs = false, // Default to not auto-starting jobs
   });
@@ -41,7 +39,6 @@ class NodeSettings {
         prefs.setString('node_username', username),
         prefs.setString('node_password', password),
         prefs.setBool('node_use_ssl', useSSL),
-        prefs.setString('default_ticket_owner', defaultTicketOwner),
         prefs.setInt('cpu_cores', cpuCores),
         prefs.setBool('auto_start_jobs', autoStartJobs),
       ]);
@@ -66,7 +63,6 @@ class NodeSettings {
         username: prefs.getString('node_username') ?? '',
         password: prefs.getString('node_password') ?? '',
         useSSL: prefs.getBool('node_use_ssl') ?? true,
-        defaultTicketOwner: prefs.getString('default_ticket_owner') ?? '',
         cpuCores: actualCores,
         autoStartJobs: prefs.getBool('auto_start_jobs') ?? false, // Default to not auto-starting jobs
       );

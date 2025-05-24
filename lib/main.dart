@@ -6,6 +6,7 @@ import 'package:miner_app/widgets/create_mining_job_dialog.dart';
 import 'package:miner_app/widgets/mining_card.dart';
 import 'package:miner_app/screens/settings_screen.dart';
 import 'package:miner_app/screens/history_screen.dart';
+import 'package:miner_app/screens/identity_screen.dart';
 import 'package:miner_app/models/node_settings.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:workmanager/workmanager.dart';
@@ -712,7 +713,20 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
         title: const Text('KBUC Miner'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.people),
+            tooltip: 'Identity Management',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const IdentityScreen(),
+                ),
+              );
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.history),
+            tooltip: 'Mining History',
             onPressed: () {
               Navigator.push(
                 context,
@@ -724,6 +738,7 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
           ),
           IconButton(
             icon: const Icon(Icons.settings),
+            tooltip: 'Settings',
             onPressed: () {
               Navigator.push(
                 context,
@@ -735,6 +750,7 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
           ),
           IconButton(
             icon: const Icon(Icons.delete_sweep),
+            tooltip: 'Clear All Jobs',
             onPressed: _clearAllJobs,
           ),
         ],

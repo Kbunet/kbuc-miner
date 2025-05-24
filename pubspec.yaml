@@ -43,6 +43,16 @@ dependencies:
   permission_handler: ^11.0.1
   wakelock_plus: ^1.1.4
   uuid: ^4.2.2
+  # For secure storage of identities
+  flutter_secure_storage: ^9.0.0
+  # For biometric authentication
+  local_auth: ^2.1.8
+  # For QR code generation
+  qr_flutter: ^4.1.0
+  # For cryptographic operations
+  pointycastle: ^3.7.3
+  # For Base58 encoding (used in WIF format)
+  bs58: ^1.0.2
 
 dev_dependencies:
   flutter_test:

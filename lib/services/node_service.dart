@@ -21,6 +21,47 @@ class BroadcastResponse {
 }
 
 class NodeService {
+  /// Generic method to make any RPC request to the node
+  Future<Map<String, dynamic>> makeRpcRequest(String method, List<dynamic> params) async {
+    final settings = await NodeSettings.load();
+    final url = Uri.parse(settings.connectionString);
+    
+    final headers = {
+      'Content-Type': 'application/json',
+    };
+
+    if (settings.username.isNotEmpty) {
+      final basicAuth = base64Encode(utf8.encode('${settings.username}:${settings.password}'));
+      headers['Authorization'] = 'Basic $basicAuth';
+    }
+
+    try {
+      _logRequest(method, params, headers);
+
+      final response = await http.post(
+        url,
+        headers: headers,
+        body: json.encode({
+          'method': method,
+          'params': params,
+          'id': 1,
+        }),
+      );
+
+      final data = json.decode(response.body);
+      _logResponse(response, data);
+
+      if (response.statusCode == 200) {
+        return data as Map<String, dynamic>;
+      } else {
+        throw Exception('Failed to execute $method: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('❌ Error in $method: $e');
+      rethrow;
+    }
+  }
+  
   void _logRequest(String method, dynamic params, Map<String, String> headers) {
     debugPrint('🌐 Sending RPC request:');
     debugPrint('  Method: $method');
@@ -36,42 +77,14 @@ class NodeService {
   }
 
   Future<Map<String, dynamic>> getSupportableLeader() async {
-    final settings = await NodeSettings.load();
-    final url = Uri.parse(settings.connectionString);
-    
-    final headers = {
-      'Content-Type': 'application/json',
-    };
-
-    if (settings.username.isNotEmpty) {
-      final basicAuth = base64Encode(utf8.encode('${settings.username}:${settings.password}'));
-      headers['Authorization'] = 'Basic $basicAuth';
-    }
-
     try {
-      _logRequest('getsupportableleader', [], headers);
-
-      final response = await http.post(
-        url,
-        headers: headers,
-        body: json.encode({
-          'method': 'getsupportableleader',
-          'params': [],
-          'id': 1,
-        }),
-      );
-
-      final data = json.decode(response.body);
-      _logResponse(response, data);
-
-      if (response.statusCode == 200) {
-        if (data['error'] != null) {
-          throw Exception(data['error']['message']);
-        }
-        return data['result'] as Map<String, dynamic>;
-      } else {
-        throw Exception('Failed to fetch leader: ${response.statusCode}');
+      final response = await makeRpcRequest('getsupportableleader', []);
+      
+      if (response['error'] != null) {
+        throw Exception(response['error']['message']);
       }
+      
+      return response['result'] as Map<String, dynamic>;
     } catch (e) {
       debugPrint('❌ Error in getSupportableLeader: $e');
       rethrow;
@@ -79,53 +92,24 @@ class NodeService {
   }
 
   Future<BroadcastResponse> broadcastRawSupportTicket(String ticketHex) async {
-    final settings = await NodeSettings.load();
-    final url = Uri.parse(settings.connectionString);
-    
-    final headers = {
-      'Content-Type': 'application/json',
-    };
-
-    if (settings.username.isNotEmpty) {
-      final basicAuth = base64Encode(utf8.encode('${settings.username}:${settings.password}'));
-      headers['Authorization'] = 'Basic $basicAuth';
-    }
-
     try {
       debugPrint('🎫 Broadcasting ticket:');
       debugPrint('  Ticket hex: $ticketHex');
-      _logRequest('broadcastsupportticket', [ticketHex], headers);
-
-      final response = await http.post(
-        url,
-        headers: headers,
-        body: json.encode({
-          'method': 'broadcastsupportticket',
-          'params': [ticketHex],
-          'id': 'curltest',
-        }),
-      );
-
-      final data = json.decode(response.body);
-      _logResponse(response, data);
-
-      if (response.statusCode == 200) {
-        if (data['error'] != null) {
-          debugPrint('❌ Error from node: ${data['error']}');
-          throw Exception('Node error: ${data['error']}');
-        }
-        
-        try {
-          return BroadcastResponse.fromJson(data);
-        } catch (parseError) {
-          debugPrint('❌ Error parsing broadcast response:');
-          debugPrint('  Error: $parseError');
-          debugPrint('  Response data: $data');
-          throw Exception('Failed to parse broadcast response: $parseError');
-        }
-      } else {
-        debugPrint('❌ HTTP error: ${response.statusCode}');
-        throw Exception('Failed to broadcast ticket: ${response.statusCode}');
+      
+      final response = await makeRpcRequest('broadcastsupportticket', [ticketHex]);
+      
+      if (response['error'] != null) {
+        debugPrint('❌ Error from node: ${response['error']}');
+        throw Exception('Node error: ${response['error']}');
+      }
+      
+      try {
+        return BroadcastResponse.fromJson(response);
+      } catch (parseError) {
+        debugPrint('❌ Error parsing broadcast response:');
+        debugPrint('  Error: $parseError');
+        debugPrint('  Response data: $response');
+        throw Exception('Failed to parse broadcast response: $parseError');
       }
     } catch (e) {
       debugPrint('❌ Error in broadcastRawSupportTicket: $e');

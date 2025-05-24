@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../services/node_service.dart';
 import '../models/node_settings.dart';
+import '../models/identity.dart';
+import '../services/identity_service.dart';
 
 class CreateMiningJobDialog extends StatefulWidget {
   final Function(
@@ -23,7 +25,10 @@ class CreateMiningJobDialog extends StatefulWidget {
 class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
   final _formKey = GlobalKey<FormState>();
   final _nodeService = NodeService();
+  final _identityService = IdentityService();
   bool _isLoading = false;
+  List<Identity> _identities = [];
+  Identity? _selectedIdentity;
 
   final _supportedHashController = TextEditingController(text: '0x' + '0' * 64);
   final _leaderController = TextEditingController();
@@ -37,16 +42,52 @@ class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
   @override
   void initState() {
     super.initState();
-    _loadDefaultOwner();
+    _loadDefaultIdentity();
     // Automatically fetch leader information when the dialog opens
     _fetchLeaderInfo();
   }
+  
+  Future<void> _loadDefaultIdentity() async {
+    try {
+      // First try to get the default identity
+      final defaultIdentity = await _identityService.getDefaultIdentity();
+      
+      if (mounted) {
+        if (defaultIdentity != null) {
+          setState(() {
+            _selectedIdentity = defaultIdentity;
+            _jobOwnerController.text = defaultIdentity.address;
+          });
+          return;
+        }
+        
+        // If no default identity, try to get any identity
+        final identities = await _identityService.getIdentities();
+        if (identities.isNotEmpty) {
+          setState(() {
+            _selectedIdentity = identities.first;
+            _jobOwnerController.text = identities.first.address;
+          });
+          return;
+        }
+        
+        // If no identities at all, use the fallback
+        _loadDefaultOwner();
+      }
+    } catch (e) {
+      debugPrint('Error loading identity: $e');
+      // Fallback to generic default address
+      _loadDefaultOwner();
+    }
+  }
 
+  // This method is now a fallback if no identity is available
   Future<void> _loadDefaultOwner() async {
-    final settings = await NodeSettings.load();
-    if (settings.defaultTicketOwner.isNotEmpty && mounted) {
+    // Set a generic default address if no identity is available
+    if (_jobOwnerController.text.isEmpty && mounted) {
       setState(() {
-        _jobOwnerController.text = settings.defaultTicketOwner;
+        // Use a generic default address
+        _jobOwnerController.text = '0000000000000000000000000000000000000000';
       });
     }
   }
@@ -184,23 +225,33 @@ class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
                 },
               ),
               const SizedBox(height: 16),
+              // Identity selector
+              // Job Owner Address field
               TextFormField(
                 controller: _jobOwnerController,
-                decoration: const InputDecoration(
-                  labelText: 'Job Owner',
-                  helperText: 'Hex string',
-                  border: OutlineInputBorder(),
+                decoration: InputDecoration(
+                  labelText: 'Mining Reward Address',
+                  helperText: _selectedIdentity != null 
+                      ? 'Using default identity: ${_selectedIdentity!.name}' 
+                      : 'Address that will receive mining rewards',
+                  border: const OutlineInputBorder(),
+                  prefixIcon: _selectedIdentity != null 
+                      ? Icon(
+                          _selectedIdentity!.isImported ? Icons.link : Icons.person,
+                          color: _selectedIdentity!.isImported ? Colors.orange : Colors.blue,
+                        ) 
+                      : null,
                 ),
+                readOnly: _selectedIdentity != null,
                 validator: (value) {
                   if (value == null || value.isEmpty) {
-                    return 'Please enter job owner';
-                  }
-                  if (!RegExp(r'^[0-9a-fA-F]+$').hasMatch(value)) {
-                    return 'Invalid hex string';
+                    return 'Please enter a reward address';
                   }
                   return null;
                 },
               ),
+
+
               const SizedBox(height: 16),
               DropdownButtonFormField<String>(
                 value: _rewardType,

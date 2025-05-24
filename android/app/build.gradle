@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "net.kbunet.miner"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 35 // Updated to support flutter_plugin_android_lifecycle
     ndkVersion = "27.0.12077973" // Updated to match device_info_plus requirement
 
     compileOptions {
@@ -33,7 +33,7 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 35 // Updated to support flutter_plugin_android_lifecycle
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }

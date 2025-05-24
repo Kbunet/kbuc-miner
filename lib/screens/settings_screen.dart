@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../models/node_settings.dart';
+import 'identity_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({Key? key}) : super(key: key);
@@ -29,7 +31,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<void> _saveSettings() async {
+  Future<void> _saveSettings(BuildContext context) async {
     if (_formKey.currentState?.validate() ?? false) {
       _formKey.currentState?.save();
       await _settings.save();
@@ -64,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.save),
-            onPressed: _saveSettings,
+            onPressed: () => _saveSettings(context),
             tooltip: 'Save Settings',
           ),
         ],
@@ -194,14 +196,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              TextFormField(
-                decoration: const InputDecoration(
-                  labelText: 'Default Ticket Owner',
-                  helperText: 'Default owner address for new mining tickets',
-                  border: OutlineInputBorder(),
+              ListTile(
+                leading: const Icon(Icons.people),
+                title: const Text('Identity Management'),
+                subtitle: const Text('Create and manage Kbunet identities for mining rewards'),
+                trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => const IdentityScreen()),
+                  );
+                },
+                tileColor: Colors.blue.withOpacity(0.05),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  side: BorderSide(color: Colors.blue.withOpacity(0.3)),
                 ),
-                initialValue: _settings.defaultTicketOwner,
-                onSaved: (value) => _settings.defaultTicketOwner = value ?? '61be48c9fd9378c47f3567af09b8c1b7c31825c4',
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               ),
               const SizedBox(height: 16),
               Row(
@@ -256,6 +267,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   });
                 },
               ),
+
             ],
           ),
         ),

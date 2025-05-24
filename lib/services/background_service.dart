@@ -190,11 +190,8 @@ class BackgroundMiningService {
           requiresDeviceIdle: false,
           requiresStorageNotLow: false,
         ),
-        // This is critical - it tells Workmanager to run this as a foreground service
-        // with a persistent notification
-        options: WorkManagerOptions(
-          foreground: true,
-        ),
+        // Note: For foreground service, we'll need to handle this differently
+        // The Workmanager version we're using doesn't directly support foreground services
       );
       
       // Register a periodic task with more frequent checks for real devices
