@@ -239,7 +239,17 @@ class MiningService {
       
       // Save the job state to persist it
       if (_activeJobs[jobId] != null) {
-        await _jobService.addJob(_activeJobs[jobId]!);
+        // Check if the job already exists in storage
+        final existingJob = await _jobService.getJob(jobId);
+        if (existingJob != null) {
+          // Update the existing job instead of adding a new one
+          await _jobService.updateJob(_activeJobs[jobId]!);
+          debugPrint('Updated existing job $jobId in storage');
+        } else {
+          // This is a new job, add it
+          await _jobService.addJob(_activeJobs[jobId]!);
+          debugPrint('Added new job $jobId to storage');
+        }
       }
     });
   }

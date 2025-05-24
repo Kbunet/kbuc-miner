@@ -1,11 +1,26 @@
 import 'package:flutter/material.dart';
 import '../models/mining_job.dart';
 import '../services/mining_service.dart';
+import '../main.dart'; // Import for MinerAppHome
+import 'package:provider/provider.dart'; // Re-add provider import
 
 class MiningJobDetails extends StatefulWidget {
   final MiningJob job;
+  final bool showActions;
 
-  const MiningJobDetails({super.key, required this.job});
+  // Static method to notify the main screen about job updates without context
+  static void _notifyMainScreenOfJob(Map<String, dynamic> jobData) {
+    // Use the static callback in MinerAppHome to send the update
+    // This avoids context issues when the widget is unmounted
+    debugPrint('Sending job update to main screen: ${jobData['jobId']}');
+    MinerAppHome.sendJobUpdate(jobData);
+  }
+
+  const MiningJobDetails({
+    Key? key,
+    required this.job,
+    this.showActions = true,
+  }) : super(key: key);
 
   @override
   State<MiningJobDetails> createState() => _MiningJobDetailsState();
@@ -13,6 +28,7 @@ class MiningJobDetails extends StatefulWidget {
 
 class _MiningJobDetailsState extends State<MiningJobDetails> {
   bool _isRebroadcasting = false;
+  bool _isContinuing = false;
   final _miningService = MiningService();
 
   @override
@@ -46,21 +62,50 @@ class _MiningJobDetailsState extends State<MiningJobDetails> {
               _buildDetailRow('Broadcast Error', widget.job.broadcastError!, isError: true),
             if (widget.job.error != null)
               _buildDetailRow('Error', widget.job.error!, isError: true),
-            if (widget.job.completed && widget.job.successful && widget.job.foundNonce != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 16.0),
-                child: ElevatedButton.icon(
-                  onPressed: _isRebroadcasting ? null : _reBroadcast,
-                  icon: _isRebroadcasting 
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.send),
-                  label: Text(_isRebroadcasting ? 'Re-Broadcasting...' : 'Re-Broadcast Ticket'),
-                ),
+              
+            // Action buttons section
+            Padding(
+              padding: const EdgeInsets.only(top: 16.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.start,
+                children: [
+                  // Continue button for incomplete jobs
+                  if (!widget.job.completed)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8.0),
+                      child: ElevatedButton.icon(
+                        onPressed: _isContinuing ? null : _continueJob,
+                        icon: _isContinuing 
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.play_arrow),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                        ),
+                        label: Text(_isContinuing ? 'Continuing...' : 'Continue Job'),
+                      ),
+                    ),
+                    
+                  // Re-broadcast button for completed successful jobs
+                  if (widget.job.completed && widget.job.successful && widget.job.foundNonce != null)
+                    ElevatedButton.icon(
+                      onPressed: _isRebroadcasting ? null : _reBroadcast,
+                      icon: _isRebroadcasting 
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.send),
+                      label: Text(_isRebroadcasting ? 'Re-Broadcasting...' : 'Re-Broadcast Ticket'),
+                    ),
+                ],
               ),
+            ),
           ],
         ),
       ),
@@ -94,6 +139,129 @@ class _MiningJobDetailsState extends State<MiningJobDetails> {
       if (mounted) {
         setState(() {
           _isRebroadcasting = false;
+        });
+      }
+    }
+  }
+  
+  /// Continue an incomplete job from history
+  Future<void> _continueJob() async {
+    try {
+      setState(() {
+        _isContinuing = true;
+      });
+      
+      // Get the job from storage to ensure we have the latest state
+      final job = await _miningService.getJob(widget.job.id);
+      
+      if (job == null) {
+        throw Exception('Job not found');
+      }
+      
+      if (job.completed) {
+        throw Exception('Cannot continue a completed job');
+      }
+      
+      // Start the job with the same parameters, resuming from the last tried nonce
+      await _miningService.startMining(
+        jobId: job.id,
+        content: job.content,
+        leader: job.leader,
+        owner: job.owner,
+        height: job.height,
+        rewardType: job.rewardType,
+        difficulty: job.difficulty,
+        startNonce: job.startNonce,
+        endNonce: job.endNonce,
+        resumeFromNonce: job.lastTriedNonce,
+        onUpdate: (update) {
+          // This callback will be called with updates from the mining service
+          debugPrint('Job ${job.id} update: ${update['status']}');
+          
+          // Only send valid updates to the main screen
+          // Null updates or updates without a status should be ignored
+          if (update != null && update['status'] != null) {
+            // Store the job information for the main screen to use later
+            // We'll use a static method to avoid context issues after widget is unmounted
+            MiningJobDetails._notifyMainScreenOfJob({
+              'jobId': job.id,
+              'status': update['status'],
+              'content': job.content,
+              'leader': job.leader,
+              'owner': job.owner,
+              'height': job.height,
+              'rewardType': job.rewardType,
+              'difficulty': job.difficulty,
+              'startNonce': job.startNonce,
+              'endNonce': job.endNonce,
+              'currentNonce': update['currentNonce'] ?? job.lastTriedNonce,
+              'progress': update['progress'] ?? 0.0,
+              'hashRate': update['hashRate'] ?? 0.0,
+              'remainingTime': update['remainingTime'] ?? 0.0,
+              // Use a fixed number of workers to avoid instability
+              'activeWorkers': job.workerLastNonces?.length ?? 1,
+            });
+          }
+        },
+      );
+      
+      if (!mounted) return;
+      
+      // Show success message
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Job ${job.id} continued successfully'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      
+      // Create a manual job update to ensure it appears in the main screen immediately
+      final jobUpdate = {
+        'jobId': job.id,
+        'status': 'progress',
+        'content': job.content,
+        'leader': job.leader,
+        'owner': job.owner,
+        'height': job.height,
+        'rewardType': job.rewardType,
+        'difficulty': job.difficulty,
+        'startNonce': job.startNonce,
+        'endNonce': job.endNonce,
+        'currentNonce': job.lastTriedNonce,
+        'progress': 0.0,
+        'hashRate': 0.0,
+        'remainingTime': 0.0,
+        'activeWorkers': job.workerLastNonces?.length ?? 1,
+      };
+      
+      // Send the update directly to the main screen
+      MinerAppHome.sendJobUpdate(jobUpdate);
+      
+      // Navigate back to the home screen to see the job in progress
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      
+      // Refresh the main screen's job list to show the continued job
+      // This is critical to ensure the job appears in the main screen
+      final homeState = MinerAppHome.of(context);
+      if (homeState != null) {
+        debugPrint('Refreshing main screen job list after continuing job ${job.id}');
+        homeState.refreshActiveJobs();
+      } else {
+        debugPrint('Warning: Could not find MinerAppHome state to refresh jobs');
+      }
+      
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to continue job: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isContinuing = false;
         });
       }
     }

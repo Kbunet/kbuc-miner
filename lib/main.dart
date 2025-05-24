@@ -66,10 +66,34 @@ class MinerApp extends StatelessWidget {
 }
 
 class MinerAppHome extends StatefulWidget {
-  const MinerAppHome({super.key});
+  const MinerAppHome({Key? key}) : super(key: key);
+
+  // Static callback for job updates from external sources
+  static Function(Map<String, dynamic>)? _jobUpdateCallback;
+
+  // Register a callback to receive job updates
+  static void registerJobUpdateCallback(Function(Map<String, dynamic>) callback) {
+    _jobUpdateCallback = callback;
+    debugPrint('Registered job update callback');
+  }
+
+  // Send job updates to the registered callback
+  static void sendJobUpdate(Map<String, dynamic> jobData) {
+    if (_jobUpdateCallback != null) {
+      debugPrint('Sending job update to callback: ${jobData['jobId']}');
+      _jobUpdateCallback!(jobData);
+    } else {
+      debugPrint('No job update callback registered');
+    }
+  }
 
   @override
-  State<MinerAppHome> createState() => _MinerAppHomeState();
+  _MinerAppHomeState createState() => _MinerAppHomeState();
+
+  // Static method to access the state from other widgets
+  static _MinerAppHomeState? of(BuildContext context) {
+    return context.findAncestorStateOfType<_MinerAppHomeState>();
+  }
 }
 
 class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver {
@@ -92,6 +116,9 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
   void initState() {
     super.initState();
     _loadActiveJobs();
+    
+    // Register callback to receive job updates from other screens
+    MinerAppHome.registerJobUpdateCallback(_handleExternalJobUpdate);
     
     // Register app lifecycle listener to save job state when app is paused or stopped
     WidgetsBinding.instance.addObserver(this);
@@ -222,6 +249,48 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
     _saveJobState();
   }
 
+  Future<void> refreshActiveJobs() async {
+    debugPrint('Refreshing active jobs from external call');
+    return _loadActiveJobs();
+  }
+
+  // Public method that can be called from other screens to handle job updates
+  void handleExternalJobUpdate(Map<String, dynamic> update) {
+    debugPrint('Handling external job update for job ${update['jobId']}');
+    _handleMiningUpdate(update);
+  }
+  
+  // Handle job updates from external sources via the static callback
+  void _handleExternalJobUpdate(Map<String, dynamic> jobData) {
+    // Validate the job data before processing
+    if (jobData == null || jobData['jobId'] == null || jobData['status'] == null) {
+      debugPrint('Ignoring invalid job update: ${jobData}');
+      return;
+    }
+    
+    debugPrint('Received external job update via callback: ${jobData['jobId']}');
+    if (!mounted) return;
+    
+    // Process the job update on the UI thread
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      
+      // Make sure we don't process duplicate updates in quick succession
+      final jobId = jobData['jobId'] as String;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final lastUpdateTime = _lastJobUpdateTime[jobId] ?? 0;
+      
+      // Only process updates if they're at least 500ms apart
+      if (now - lastUpdateTime > 500) {
+        _lastJobUpdateTime[jobId] = now;
+        _handleMiningUpdate(jobData);
+      }
+    });
+  }
+  
+  // Track the last update time for each job to prevent rapid updates
+  final Map<String, int> _lastJobUpdateTime = {};
+
   Future<void> _loadActiveJobs() async {
     try {
       // We no longer auto-load jobs from history on app startup
@@ -231,9 +300,21 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
       // Only load jobs that are currently active in memory (if any)
       // This would typically be empty on app startup
       final activeJobs = _miningService.getCurrentlyActiveJobs();
+      debugPrint('Found ${activeJobs.length} active jobs in mining service');
       
       if (activeJobs.isNotEmpty) {
+        // Clear existing jobs first to avoid stale data
         setState(() {
+          // Only clear jobs that aren't in the active jobs list
+          final activeJobIds = activeJobs.map((job) => job.id).toSet();
+          final jobsToRemove = _jobs.keys.where((id) => !activeJobIds.contains(id)).toList();
+          
+          for (final jobId in jobsToRemove) {
+            _jobs.remove(jobId);
+            _pausedJobs.remove(jobId);
+          }
+          
+          // Now add or update all active jobs
           for (final job in activeJobs) {
             // Get the number of active workers for this job
             final activeWorkers = _miningService.getActiveWorkerCount(job.id);
@@ -262,6 +343,8 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
         });
         
         debugPrint('Loaded ${activeJobs.length} currently active jobs');
+      } else {
+        debugPrint('No active jobs found in mining service');
       }
     } catch (e) {
       debugPrint('Error loading active jobs: $e');
@@ -344,6 +427,16 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
       
       final jobId = update['jobId'] as String;
       final status = update['status'] as String?;
+      
+      // Debug log for job updates
+      debugPrint('Main screen handling job update: $jobId, status: $status');
+      
+      // For continued jobs, we need to make sure they appear in the jobs list
+      if (status == 'progress' && !_jobs.containsKey(jobId)) {
+        debugPrint('Adding continued job to main screen: $jobId');
+        _addContinuedJobToMainScreen(update);
+        return;
+      }
       
       // Handle different update types
       switch (status) {
@@ -487,6 +580,48 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
         _pausedJobs.remove(jobId);
       }
     });
+  }
+  
+  // Special handler for continued jobs to ensure they appear in the main screen
+  void _addContinuedJobToMainScreen(Map<String, dynamic> update) {
+    final jobId = update['jobId'] as String;
+    
+    // Make sure we're on the UI thread
+    setState(() {
+      // Add the job to the UI state
+      _jobs[jobId] = {
+        'content': update['content'],
+        'leader': update['leader'],
+        'owner': update['owner'],
+        'height': update['height'],
+        'rewardType': update['rewardType'],
+        'difficulty': update['difficulty'],
+        'startNonce': update['startNonce'],
+        'endNonce': update['endNonce'],
+        'progress': _safeDoubleValue(update['progress']),
+        'hashRate': _safeDoubleValue(update['hashRate']),
+        'remainingTime': _safeDoubleValue(update['remainingTime']),
+        'currentNonce': update['currentNonce'] as int? ?? update['startNonce'] as int? ?? 0,
+        'speedMultiplier': 1.0,
+        'activeWorkers': update['activeWorkers'] as int? ?? 1,
+        'workerDetails': update['workerDetails'] != null 
+          ? (update['workerDetails'] as List).cast<Map<String, dynamic>>() 
+          : <Map<String, dynamic>>[],
+      };
+      
+      // Mark the job as not paused
+      _pausedJobs[jobId] = false;
+    });
+    
+    // Show a notification that the job was continued
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Job $jobId continued from history'),
+        backgroundColor: Colors.green,
+      ),
+    );
+    
+    debugPrint('Added continued job to main screen: $jobId');
   }
   
   // Helper method to safely convert values to double

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import '../models/mining_job.dart';
 
 // Sorting options
@@ -23,7 +24,31 @@ class MiningJobService {
 
   Future<void> _ensureInitialized() async {
     if (!_initialized) {
-      _jobs = await MiningJob.loadAll();
+      // Load all jobs from storage
+      final allJobs = await MiningJob.loadAll();
+      
+      // Deduplicate jobs by ID - keep only the most recent version of each job
+      final Map<String, MiningJob> uniqueJobs = {};
+      
+      // Process jobs in reverse order (newest first) to ensure we keep the most recent version
+      // when there are duplicates
+      for (final job in allJobs.reversed) {
+        uniqueJobs[job.id] = job;
+      }
+      
+      // Convert back to a list
+      _jobs = uniqueJobs.values.toList();
+      
+      // Log the deduplication results
+      final duplicatesRemoved = allJobs.length - _jobs.length;
+      if (duplicatesRemoved > 0) {
+        debugPrint('Removed $duplicatesRemoved duplicate job(s) during initialization');
+        
+        // Save the deduplicated jobs back to storage
+        await MiningJob.saveAll(_jobs);
+        debugPrint('Saved deduplicated jobs to storage');
+      }
+      
       _initialized = true;
     }
   }
@@ -138,7 +163,20 @@ class MiningJobService {
 
   Future<void> addJob(MiningJob job) async {
     await _ensureInitialized();
-    _jobs.add(job);
+  
+    // Check if a job with this ID already exists
+    final existingIndex = _jobs.indexWhere((existingJob) => existingJob.id == job.id);
+  
+    if (existingIndex != -1) {
+      // Update the existing job instead of adding a duplicate
+      _jobs[existingIndex] = job;
+      debugPrint('Updated existing job ${job.id} instead of adding duplicate');
+    } else {
+      // This is a new job, add it
+      _jobs.add(job);
+      debugPrint('Added new job ${job.id}');
+    }
+  
     await MiningJob.saveAll(_jobs);
   }
 

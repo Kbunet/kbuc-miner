@@ -163,14 +163,16 @@ class _MiningCardState extends State<MiningCard> {
             ),
           ),
           
-          // Progress bar
-          LinearProgressIndicator(
-            value: progress,
-            backgroundColor: Colors.grey.shade200,
-            valueColor: AlwaysStoppedAnimation<Color>(
-              widget.isPaused ? Colors.orange : Colors.green,
+          // Progress bar - only show if the job has an end nonce
+          if (hasEndNonce) ...[  
+            LinearProgressIndicator(
+              value: progress,
+              backgroundColor: Colors.grey.shade200,
+              valueColor: AlwaysStoppedAnimation<Color>(
+                widget.isPaused ? Colors.orange : Colors.green,
+              ),
             ),
-          ),
+          ],
           
           // Summary stats (always visible)
           Padding(
