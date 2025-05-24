@@ -224,64 +224,44 @@ class _MinerAppHomeState extends State<MinerAppHome> with WidgetsBindingObserver
 
   Future<void> _loadActiveJobs() async {
     try {
-      final activeJobs = await _miningService.getActiveJobs();
+      // We no longer auto-load jobs from history on app startup
+      // Users will need to manually continue unfinished jobs from the history screen
+      debugPrint('Auto-loading of jobs from history is disabled. User must manually continue jobs from history.');
       
-      // Load settings to check if auto-start is enabled
-      final settings = await NodeSettings.load();
-      final autoStartEnabled = settings.autoStartJobs;
+      // Only load jobs that are currently active in memory (if any)
+      // This would typically be empty on app startup
+      final activeJobs = _miningService.getCurrentlyActiveJobs();
       
-      setState(() {
-        for (final job in activeJobs) {
-          // Get the number of active workers for this job
-          final activeWorkers = _miningService.getActiveWorkerCount(job.id);
-          
-          _jobs[job.id] = {
-            'content': job.content,
-            'leader': job.leader,
-            'owner': job.owner,
-            'height': job.height,
-            'rewardType': job.rewardType, // Already stored as string '0' or '1'
-            'difficulty': job.difficulty,
-            'startNonce': job.startNonce,
-            'endNonce': job.endNonce,
-            'progress': 0.0, // Will be updated by mining service
-            'hashRate': 0.0, // Will be updated by mining service
-            'remainingTime': 0.0, // Will be updated by mining service
-            'currentNonce': job.lastTriedNonce,
-            'speedMultiplier': 1.0, // Default speed multiplier
-            'activeWorkers': activeWorkers, // Add active workers count
-            'workerDetails': [], // Initialize worker details
-          };
-          
-          // Initialize as not paused
-          _pausedJobs[job.id] = false;
-        }
-      });
-      
-      // Only start mining jobs if auto-start is enabled
-      if (autoStartEnabled) {
-        debugPrint('Auto-start enabled, resuming ${_jobs.length} mining jobs');
-        // Start listening for updates for each job
-        for (final jobId in _jobs.keys) {
-          _miningService.startMining(
-            jobId: jobId,
-            content: _jobs[jobId]!['content'] as String,
-            leader: _jobs[jobId]!['leader'] as String,
-            owner: _jobs[jobId]!['owner'] as String,
-            height: _jobs[jobId]!['height'] as int,
-            rewardType: _jobs[jobId]!['rewardType'] as String, // Pass as string '0' or '1' per memory requirement
-            difficulty: _jobs[jobId]!['difficulty'] as int,
-            startNonce: _jobs[jobId]!['startNonce'] as int,
-            endNonce: _jobs[jobId]!['endNonce'] as int,
-            onUpdate: (_) {}, // Empty callback as we're using streams now
-          );
-        }
-      } else {
-        debugPrint('Auto-start disabled, loaded ${_jobs.length} mining jobs without starting them');
-        // Mark all jobs as paused since we're not starting them
-        for (final jobId in _jobs.keys) {
-          _pausedJobs[jobId] = true;
-        }
+      if (activeJobs.isNotEmpty) {
+        setState(() {
+          for (final job in activeJobs) {
+            // Get the number of active workers for this job
+            final activeWorkers = _miningService.getActiveWorkerCount(job.id);
+            
+            _jobs[job.id] = {
+              'content': job.content,
+              'leader': job.leader,
+              'owner': job.owner,
+              'height': job.height,
+              'rewardType': job.rewardType, // Already stored as string '0' or '1'
+              'difficulty': job.difficulty,
+              'startNonce': job.startNonce,
+              'endNonce': job.endNonce,
+              'progress': 0.0, // Will be updated by mining service
+              'hashRate': 0.0, // Will be updated by mining service
+              'remainingTime': 0.0, // Will be updated by mining service
+              'currentNonce': job.lastTriedNonce,
+              'speedMultiplier': 1.0, // Default speed multiplier
+              'activeWorkers': activeWorkers, // Add active workers count
+              'workerDetails': [], // Initialize worker details
+            };
+            
+            // Initialize as not paused
+            _pausedJobs[job.id] = false;
+          }
+        });
+        
+        debugPrint('Loaded ${activeJobs.length} currently active jobs');
       }
     } catch (e) {
       debugPrint('Error loading active jobs: $e');

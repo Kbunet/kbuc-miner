@@ -1177,6 +1177,36 @@ class MiningService {
     return await _jobService.getActiveJobs();
   }
 
+  /// Returns only the jobs that are currently active in memory
+  /// This doesn't load jobs from storage, only returns what's already running
+  List<MiningJob> getCurrentlyActiveJobs() {
+    // Return only the jobs that are currently active in the mining service
+    // This doesn't load from storage, only returns what's already in memory
+    final List<MiningJob> activeJobs = [];
+    
+    // Convert the active jobs from the internal format to MiningJob objects
+    _activeJobs.forEach((jobId, jobData) {
+      // Only include jobs that are actually running or paused, not completed ones
+      if (!jobData.completed) {
+        activeJobs.add(MiningJob(
+          id: jobId,
+          content: jobData.content,
+          leader: jobData.leader,
+          owner: jobData.owner,
+          height: jobData.height,
+          rewardType: jobData.rewardType, // Already stored as string '0' or '1'
+          difficulty: jobData.difficulty,
+          startNonce: jobData.startNonce,
+          endNonce: jobData.endNonce,
+          startTime: jobData.startTime,
+          lastTriedNonce: jobData.lastTriedNonce,
+        ));
+      }
+    });
+    
+    return activeJobs;
+  }
+
   // Get the number of active workers for a job
   int getActiveWorkerCount(String jobId) {
     if (!_jobWorkers.containsKey(jobId)) return 0;

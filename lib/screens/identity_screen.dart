@@ -785,164 +785,342 @@ class _IdentityScreenState extends State<IdentityScreen> {
                             side: BorderSide(color: Colors.blue.shade300, width: 2),
                           )
                         : null,
-                      child: ListTile(
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        leading: Stack(
-                          children: [
-                            CircleAvatar(
-                              radius: 24,
-                              backgroundColor: identity.isDefault
-                                  ? Colors.blue
-                                  : identity.isImported 
-                                      ? Colors.orange
-                                      : Colors.grey,
-                              child: Icon(
-                                identity.isImported ? Icons.link : Icons.person,
-                                color: Colors.white,
-                                size: 22,
-                              ),
-                            ),
-                            if (identity.isDefault)
-                              Positioned(
-                                right: 0,
-                                bottom: 0,
-                                child: Container(
-                                  padding: const EdgeInsets.all(2),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(color: Colors.blue, width: 1),
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          // Determine if we're on a small screen
+                          final isSmallScreen = constraints.maxWidth < 600;
+                          
+                          // For very small screens, we'll use a more compact layout
+                          if (isSmallScreen) {
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                // Header with avatar and name
+                                Padding(
+                                  padding: const EdgeInsets.all(16.0),
+                                  child: Row(
+                                    children: [
+                                      // Avatar with badge
+                                      Stack(
+                                        children: [
+                                          CircleAvatar(
+                                            radius: 24,
+                                            backgroundColor: identity.isDefault
+                                                ? Colors.blue
+                                                : identity.isImported 
+                                                    ? Colors.orange
+                                                    : Colors.grey,
+                                            child: Icon(
+                                              identity.isImported ? Icons.link : Icons.person,
+                                              color: Colors.white,
+                                              size: 22,
+                                            ),
+                                          ),
+                                          if (identity.isDefault)
+                                            Positioned(
+                                              right: 0,
+                                              bottom: 0,
+                                              child: Container(
+                                                padding: const EdgeInsets.all(2),
+                                                decoration: BoxDecoration(
+                                                  color: Colors.white,
+                                                  shape: BoxShape.circle,
+                                                  border: Border.all(color: Colors.blue, width: 1),
+                                                ),
+                                                child: const Icon(Icons.check_circle, size: 12, color: Colors.blue),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                      const SizedBox(width: 16),
+                                      // Name with ellipsis for overflow
+                                      Expanded(
+                                        child: Text(
+                                          identity.name,
+                                          style: TextStyle(
+                                            fontWeight: identity.isDefault ? FontWeight.bold : FontWeight.normal,
+                                            fontSize: 18,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                  child: const Icon(Icons.check_circle, size: 12, color: Colors.blue),
+                                ),
+                                
+                                // Profile info chips
+                                if (identity.hasLoadedProfileInfo)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                                    child: Wrap(
+                                      spacing: 8,
+                                      runSpacing: 8,
+                                      children: [
+                                        // RPS chip
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
+                                          decoration: BoxDecoration(
+                                            color: Colors.amber.withOpacity(0.1),
+                                            borderRadius: BorderRadius.circular(16),
+                                            border: Border.all(color: Colors.amber.withOpacity(0.3), width: 1),
+                                          ),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(Icons.star, size: 16, color: Colors.amber),
+                                              const SizedBox(width: 6),
+                                              Text(
+                                                _profileService.formatRps(identity.rps),
+                                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        
+                                        // Balance chip
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
+                                          decoration: BoxDecoration(
+                                            color: Colors.green.withOpacity(0.1),
+                                            borderRadius: BorderRadius.circular(16),
+                                            border: Border.all(color: Colors.green.withOpacity(0.3), width: 1),
+                                          ),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(Icons.account_balance_wallet, size: 16, color: Colors.green),
+                                              const SizedBox(width: 6),
+                                              Text(
+                                                _profileService.formatBalance(identity.balance),
+                                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  
+                                // Loading indicator
+                                if (identity.isLoadingProfileInfo)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        SizedBox(height: 12, width: 12, child: CircularProgressIndicator(strokeWidth: 2)),
+                                        const SizedBox(width: 8),
+                                        Text('Loading profile info...', style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
+                                      ],
+                                    ),
+                                  ),
+                                  
+                                // Action buttons
+                                Padding(
+                                  padding: const EdgeInsets.all(8.0),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.end,
+                                    children: [
+                                      // Info button
+                                      IconButton(
+                                        icon: const Icon(Icons.info_outline),
+                                        tooltip: 'Get Profile Info',
+                                        onPressed: () => _loadProfileInfo(identity),
+                                        iconSize: 22,
+                                        padding: const EdgeInsets.all(8),
+                                      ),
+                                      // Set as default button (only for non-default identities)
+                                      if (!identity.isDefault)
+                                        IconButton(
+                                          icon: const Icon(Icons.check_circle_outline),
+                                          tooltip: 'Set as default',
+                                          onPressed: () => _setAsDefault(identity),
+                                          iconSize: 22,
+                                          padding: const EdgeInsets.all(8),
+                                        ),
+                                      // Export button
+                                      IconButton(
+                                        icon: const Icon(Icons.qr_code),
+                                        tooltip: 'Export',
+                                        onPressed: identity.isImported 
+                                          ? () => _showAddressDialog(identity) 
+                                          : () => _showExportDialog(identity),
+                                        iconSize: 22,
+                                        padding: const EdgeInsets.all(8),
+                                      ),
+                                      // Delete button
+                                      IconButton(
+                                        icon: const Icon(Icons.delete_outline),
+                                        tooltip: 'Delete',
+                                        onPressed: () => _confirmDeleteIdentity(identity),
+                                        iconSize: 22,
+                                        padding: const EdgeInsets.all(8),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+                          } else {
+                            // For larger screens, use the original ListTile layout with some responsive tweaks
+                            return ListTile(
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                              leading: Stack(
+                                children: [
+                                  CircleAvatar(
+                                    radius: 24,
+                                    backgroundColor: identity.isDefault
+                                        ? Colors.blue
+                                        : identity.isImported 
+                                            ? Colors.orange
+                                            : Colors.grey,
+                                    child: Icon(
+                                      identity.isImported ? Icons.link : Icons.person,
+                                      color: Colors.white,
+                                      size: 22,
+                                    ),
+                                  ),
+                                  if (identity.isDefault)
+                                    Positioned(
+                                      right: 0,
+                                      bottom: 0,
+                                      child: Container(
+                                        padding: const EdgeInsets.all(2),
+                                        decoration: BoxDecoration(
+                                          color: Colors.white,
+                                          shape: BoxShape.circle,
+                                          border: Border.all(color: Colors.blue, width: 1),
+                                        ),
+                                        child: const Icon(Icons.check_circle, size: 12, color: Colors.blue),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              title: Padding(
+                                padding: const EdgeInsets.only(top: 8.0, bottom: 4.0),
+                                child: Text(
+                                  identity.name,
+                                  style: TextStyle(
+                                    fontWeight: identity.isDefault ? FontWeight.bold : FontWeight.normal,
+                                    fontSize: 18,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                          ],
-                        ),
-                        title: Padding(
-                          padding: const EdgeInsets.only(top: 8.0, bottom: 4.0),
-                          child: Text(
-                            identity.name,
-                            style: TextStyle(
-                              fontWeight: identity.isDefault ? FontWeight.bold : FontWeight.normal,
-                              fontSize: 18,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        subtitle: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            
-                            // Profile info row
-                            if (identity.hasLoadedProfileInfo)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 12.0, bottom: 4.0),
-                                child: Row(
-                                  children: [
-                                    // RPS chip
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
-                                      decoration: BoxDecoration(
-                                        color: Colors.amber.withOpacity(0.1),
-                                        borderRadius: BorderRadius.circular(16),
-                                        border: Border.all(color: Colors.amber.withOpacity(0.3), width: 1),
-                                      ),
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  
+                                  // Profile info row
+                                  if (identity.hasLoadedProfileInfo)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 12.0, bottom: 4.0),
+                                      child: Wrap(
+                                        spacing: 16,
+                                        runSpacing: 8,
                                         children: [
-                                          Icon(Icons.star, size: 16, color: Colors.amber),
-                                          const SizedBox(width: 6),
-                                          Text(
-                                            _profileService.formatRps(identity.rps),
-                                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                                          // RPS chip
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
+                                            decoration: BoxDecoration(
+                                              color: Colors.amber.withOpacity(0.1),
+                                              borderRadius: BorderRadius.circular(16),
+                                              border: Border.all(color: Colors.amber.withOpacity(0.3), width: 1),
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Icon(Icons.star, size: 16, color: Colors.amber),
+                                                const SizedBox(width: 6),
+                                                Text(
+                                                  _profileService.formatRps(identity.rps),
+                                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          
+                                          // Balance chip
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
+                                            decoration: BoxDecoration(
+                                              color: Colors.green.withOpacity(0.1),
+                                              borderRadius: BorderRadius.circular(16),
+                                              border: Border.all(color: Colors.green.withOpacity(0.3), width: 1),
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Icon(Icons.account_balance_wallet, size: 16, color: Colors.green),
+                                                const SizedBox(width: 6),
+                                                Text(
+                                                  _profileService.formatBalance(identity.balance),
+                                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                                                ),
+                                              ],
+                                            ),
                                           ),
                                         ],
                                       ),
                                     ),
-                                    
-                                    const SizedBox(width: 16),
-                                    
-                                    // Balance chip
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
-                                      decoration: BoxDecoration(
-                                        color: Colors.green.withOpacity(0.1),
-                                        borderRadius: BorderRadius.circular(16),
-                                        border: Border.all(color: Colors.green.withOpacity(0.3), width: 1),
-                                      ),
+                                  
+                                  // Loading indicator
+                                  if (identity.isLoadingProfileInfo)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 4.0),
                                       child: Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
-                                          Icon(Icons.account_balance_wallet, size: 16, color: Colors.green),
-                                          const SizedBox(width: 6),
-                                          Text(
-                                            _profileService.formatBalance(identity.balance),
-                                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                                          ),
+                                          SizedBox(height: 12, width: 12, child: CircularProgressIndicator(strokeWidth: 2)),
+                                          const SizedBox(width: 8),
+                                          Text('Loading profile info...', style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
                                         ],
                                       ),
                                     ),
-                                  ],
-                                ),
+                                ],
                               ),
-                            
-                            // Loading indicator
-                            if (identity.isLoadingProfileInfo)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 4.0),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    SizedBox(height: 12, width: 12, child: CircularProgressIndicator(strokeWidth: 2)),
-                                    const SizedBox(width: 8),
-                                    Text('Loading profile info...', style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
-                                  ],
-                                ),
+                              isThreeLine: true,
+                              trailing: Wrap(
+                                spacing: 0,
+                                children: [
+                                  // Info button to fetch profile information
+                                  IconButton(
+                                    icon: const Icon(Icons.info_outline),
+                                    tooltip: 'Get Profile Info',
+                                    onPressed: () => _loadProfileInfo(identity),
+                                    iconSize: 22,
+                                    padding: const EdgeInsets.all(8),
+                                  ),
+                                  if (!identity.isDefault)
+                                    IconButton(
+                                      icon: const Icon(Icons.check_circle_outline),
+                                      tooltip: 'Set as default',
+                                      onPressed: () => _setAsDefault(identity),
+                                      iconSize: 22,
+                                      padding: const EdgeInsets.all(8),
+                                    ),
+                                  IconButton(
+                                    icon: const Icon(Icons.qr_code),
+                                    tooltip: 'Export',
+                                    onPressed: identity.isImported 
+                                      ? () => _showAddressDialog(identity) 
+                                      : () => _showExportDialog(identity),
+                                    iconSize: 22,
+                                    padding: const EdgeInsets.all(8),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.delete_outline),
+                                    tooltip: 'Delete',
+                                    onPressed: () => _confirmDeleteIdentity(identity),
+                                    iconSize: 22,
+                                    padding: const EdgeInsets.all(8),
+                                  ),
+                                ],
                               ),
-                          ],
-                        ),
-                        isThreeLine: true,
-                        trailing: Container(
-                          width: 140,
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.end,
-                            children: [
-                              // Info button to fetch profile information
-                              IconButton(
-                                icon: const Icon(Icons.info_outline),
-                                tooltip: 'Get Profile Info',
-                                onPressed: () => _loadProfileInfo(identity),
-                                iconSize: 22,
-                                padding: const EdgeInsets.all(8),
-                              ),
-                              if (!identity.isDefault)
-                                IconButton(
-                                  icon: const Icon(Icons.check_circle_outline),
-                                  tooltip: 'Set as default',
-                                  onPressed: () => _setAsDefault(identity),
-                                  iconSize: 22,
-                                  padding: const EdgeInsets.all(8),
-                                ),
-                              IconButton(
-                                icon: const Icon(Icons.qr_code),
-                                tooltip: 'Export',
-                                onPressed: identity.isImported 
-                                  ? () => _showAddressDialog(identity) 
-                                  : () => _showExportDialog(identity),
-                                iconSize: 22,
-                                padding: const EdgeInsets.all(8),
-                              ),
-                              IconButton(
-                                icon: const Icon(Icons.delete_outline),
-                                tooltip: 'Delete',
-                                onPressed: () => _confirmDeleteIdentity(identity),
-                                iconSize: 22,
-                                padding: const EdgeInsets.all(8),
-                              ),
-                           ],
-                          ),
-                        ),
+                            );
+                          }
+                        },
                       ),
                     );
                   },
