@@ -47,6 +47,7 @@ dependencies:
   flutter_secure_storage: ^9.0.0
   # For biometric authentication
   local_auth: ^2.1.8
+  local_auth_android: ^1.0.47
   # For QR code generation
   qr_flutter: ^4.1.0
   # For cryptographic operations

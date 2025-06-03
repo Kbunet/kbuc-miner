@@ -19,6 +19,7 @@ class IdentityScreen extends StatefulWidget {
 
 class _IdentityScreenState extends State<IdentityScreen> {
   final ProfileService _profileService = ProfileService();
+  final TextEditingController _passwordController = TextEditingController();
   // Helper method to convert hex private key to WIF format if needed
   String? _getWIFPrivateKey(Identity identity) {
     final privateKey = identity.privateKey;
@@ -77,65 +78,252 @@ class _IdentityScreenState extends State<IdentityScreen> {
   bool _isLoading = true;
   bool _isAuthEnabled = false;
   bool _isBiometricAvailable = false;
+  bool _isAuthenticating = false;
+  String _authMethod = 'biometric';
 
   @override
   void initState() {
     super.initState();
-    _loadIdentities();
     _checkAuthSettings();
+    _loadIdentities();
+  }
+  
+  @override
+  void dispose() {
+    _passwordController.dispose();
+    super.dispose();
   }
 
   Future<void> _checkAuthSettings() async {
     final isBiometricAvailable = await _identityService.isBiometricAvailable();
     final isAuthEnabled = await _identityService.isAuthenticationEnabled();
+    final authMethod = await _identityService.getAuthMethod();
     
     setState(() {
       _isBiometricAvailable = isBiometricAvailable;
       _isAuthEnabled = isAuthEnabled;
+      _authMethod = authMethod;
     });
   }
 
   // Authenticate the user explicitly
   Future<bool> _authenticateUser() async {
     setState(() {
-      _isLoading = true;
+      _isAuthenticating = true;
     });
     
     try {
-      final authenticated = await _identityService.authenticate();
-      setState(() {
-        _isLoading = false;
-      });
+      final authMethod = await _identityService.getAuthMethod();
+      debugPrint('Authentication method: $authMethod');
       
-      if (!authenticated) {
+      if (authMethod == 'biometric') {
+        // Show a message to prepare the user for fingerprint scan
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Authentication failed')),
+            const SnackBar(content: Text('Prepare to scan your fingerprint...')),
           );
         }
+        
+        // Wait a moment before triggering the fingerprint scanner
+        await Future.delayed(const Duration(seconds: 1));
+        
+        // Use biometric authentication
+        debugPrint('Attempting biometric authentication...');
+        final authenticated = await _identityService.authenticate();
+        debugPrint('Biometric authentication result: $authenticated');
+        
+        if (!mounted) return false;
+        
+        setState(() {
+          _isAuthenticating = false;
+        });
+        
+        if (authenticated && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Biometric authentication successful'),
+              backgroundColor: Colors.green,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        } else if (!authenticated && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Biometric authentication failed. Please try again.'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+        
+        return authenticated;
+      } else {
+        // Use password authentication
+        debugPrint('Attempting password authentication...');
+        final authenticated = await _showPasswordDialog();
+        debugPrint('Password authentication result: $authenticated');
+        
+        if (!mounted) return false;
+        
+        setState(() {
+          _isAuthenticating = false;
+        });
+        
+        if (authenticated) {
+          // If password verification was successful, load identities directly
+          // using the special method that bypasses authentication checks
+          debugPrint('Password verified, loading identities directly');
+          final identities = await _identityService.getIdentitiesAfterPasswordVerification();
+          debugPrint('Loaded ${identities.length} identities after password verification');
+          
+          if (mounted) {
+            setState(() {
+              _identities = identities;
+            });
+            
+            // Show success message
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Password verified successfully'),
+                backgroundColor: Colors.green,
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+        } else if (!authenticated && mounted) {
+          // If password verification failed, show error message
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Incorrect password'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+        
+        return authenticated;
       }
-      
-      return authenticated;
     } catch (e) {
+      debugPrint('Authentication error: $e');
+      if (!mounted) return false;
+      
       setState(() {
-        _isLoading = false;
+        _isAuthenticating = false;
       });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Authentication error: $e')),
-        );
-      }
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Authentication error: $e')),
+      );
+      
       return false;
     }
+  }
+  
+  Future<bool> _showPasswordDialog() async {
+    _passwordController.clear();
+    
+    return await showDialog<bool>(context: context, builder: (context) {
+      bool obscurePassword = true;
+      
+      return StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            title: const Text('Authentication Required'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('Enter your password to access your identities'),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _passwordController,
+                  obscureText: obscurePassword,
+                  decoration: InputDecoration(
+                    labelText: 'Password',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: Icon(obscurePassword ? Icons.visibility : Icons.visibility_off),
+                      onPressed: () {
+                        setState(() {
+                          obscurePassword = !obscurePassword;
+                        });
+                      },
+                    ),
+                  ),
+                  onSubmitted: (_) async {
+                    final verified = await _identityService.verifyPassword(_passwordController.text);
+                    Navigator.of(context).pop(verified);
+                  },
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () async {
+                  final verified = await _identityService.verifyPassword(_passwordController.text);
+                  Navigator.of(context).pop(verified);
+                },
+                child: const Text('Verify'),
+              ),
+            ],
+          );
+        },
+      );
+    }) ?? false;
   }
 
   Future<void> _loadIdentities() async {
     setState(() {
       _isLoading = true;
     });
-
+    
     try {
+      // Check if authentication is required
+      final isAuthEnabled = await _identityService.isAuthenticationEnabled();
+      final authMethod = await _identityService.getAuthMethod();
+      
+      debugPrint('Loading identities - Auth enabled: $isAuthEnabled, Auth method: $authMethod');
+      
+      // Get identities from the service
       final identities = await _identityService.getIdentities();
+      debugPrint('Initial identities load returned ${identities.length} identities');
+      
+      // If authentication is required and identities list is empty
+      if (identities.isEmpty && isAuthEnabled) {
+        debugPrint('No identities loaded and auth is enabled - handling authentication');
+        
+        // If using password auth and we haven't authenticated yet, try to authenticate
+        if (authMethod == 'password' && !_isAuthenticating) {
+          debugPrint('Using password auth - showing password dialog');
+          
+          setState(() {
+            _isLoading = false;
+            _identities = [];
+          });
+          
+          // Show password dialog and try to authenticate
+          final authenticated = await _authenticateUser();
+          debugPrint('Password authentication result: $authenticated');
+          
+          // Note: We don't need to reload identities here because _authenticateUser
+          // already loads identities on successful authentication
+          return;
+        } else {
+          // For biometric auth or if we're already authenticating, just show the auth UI
+          debugPrint('Using biometric auth or already authenticating - showing auth UI');
+          
+          setState(() {
+            _isLoading = false;
+            _identities = [];
+          });
+          return;
+        }
+      }
+      
+      debugPrint('Setting identities in state: ${identities.length} items');
       setState(() {
         _identities = identities;
         _isLoading = false;
@@ -144,17 +332,18 @@ class _IdentityScreenState extends State<IdentityScreen> {
       // We no longer load profile info automatically
       // Profile info will be loaded on demand when the user requests it
     } catch (e) {
+      debugPrint('Error loading identities: $e');
+      setState(() {
+        _isLoading = false;
+      });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error loading identities: $e')),
         );
       }
-      setState(() {
-        _isLoading = false;
-      });
     }
   }
-  
+
   Future<void> _loadProfileInfo(Identity identity) async {
     // Skip if already loading or already loaded
     if (identity.isLoadingProfileInfo) return;
@@ -688,75 +877,246 @@ class _IdentityScreenState extends State<IdentityScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Scaffold(
+        body: Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+    
+    // Show authentication UI if needed
+    if (_identities.isEmpty && _isAuthEnabled) {
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text('Identity Management'),
+        ),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.lock,
+                  size: 64,
+                  color: Colors.blue,
+                ),
+                const SizedBox(height: 24),
+                const Text(
+                  'Authentication Required',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Your identities are protected. Please authenticate to view them.',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
+                ElevatedButton.icon(
+                  icon: _authMethod == 'biometric' 
+                      ? const Icon(Icons.fingerprint) 
+                      : const Icon(Icons.password),
+                  label: Text(_authMethod == 'biometric' 
+                      ? 'Authenticate with Biometrics' 
+                      : 'Authenticate with Password'),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: () async {
+                    debugPrint('Authentication button in dialog pressed');
+                    final authMethod = await _identityService.getAuthMethod();
+                    debugPrint('Authentication method: $authMethod');
+                    
+                    final authenticated = await _authenticateUser();
+                    debugPrint('Authentication result: $authenticated');
+                    
+                    if (authenticated) {
+                      if (authMethod == 'password') {
+                        // For password auth, load identities directly using the bypass method
+                        debugPrint('Loading identities directly after password auth');
+                        final identities = await _identityService.getIdentitiesAfterPasswordVerification();
+                        debugPrint('Loaded ${identities.length} identities from dialog button');
+                        
+                        if (mounted) {
+                          setState(() {
+                            _identities = identities;
+                          });
+                        }
+                      } else {
+                        // For biometric auth, reload identities normally
+                        await _loadIdentities();
+                      }
+                    }
+                  },
+                ),
+                const SizedBox(height: 16),
+                TextButton(
+                  onPressed: () async {
+                    // Require authentication before disabling security
+                    final authenticated = await _authenticateUser();
+                    if (authenticated) {
+                      await _identityService.setAuthenticationEnabled(false);
+                      await _checkAuthSettings();
+                      await _loadIdentities();
+                    }
+                  },
+                  child: const Text('Disable Authentication'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Identity Management'),
         actions: [
           IconButton(
             icon: const Icon(Icons.add_circle_outline),
-            onPressed: () => _showImportIdentityDialog(),
+            onPressed: _showImportIdentityDialog,
             tooltip: 'Import Identity',
           ),
-          // Security button temporarily hidden
-          // IconButton(
-          //   icon: const Icon(Icons.security),
-          //   onPressed: () => _showSecuritySettingsDialog(),
-          //   tooltip: 'Security Settings',
-          // ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _identities.isEmpty
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      if (_isAuthEnabled)
-                        Column(
-                          children: [
-                            const Text(
-                              'Authentication required',
-                              style: TextStyle(fontSize: 18),
-                            ),
-                            const SizedBox(height: 8),
-                            const Text(
-                              'Please authenticate to view your identities',
-                              style: TextStyle(color: Colors.grey),
-                            ),
-                            const SizedBox(height: 24),
-                            ElevatedButton.icon(
-                              icon: const Icon(Icons.fingerprint),
-                              label: const Text('Authenticate'),
-                              onPressed: () async {
-                                final authenticated = await _authenticateUser();
-                                if (authenticated) {
-                                  await _loadIdentities();
-                                }
-                              },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.blue,
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            TextButton(
-                              onPressed: () async {
-                                // Require authentication before disabling security
-                                final authenticated = await _authenticateUser();
-                                if (authenticated) {
-                                  await _identityService.setAuthenticationEnabled(false);
-                                  await _checkAuthSettings();
-                                  await _loadIdentities();
-                                }
-                              },
-                              child: const Text('Disable Authentication'),
-                            ),
-                          ],
-                        )
-                      else
-                        Column(
+      body: _identities.isEmpty
+          ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (_isAuthEnabled)
+                    Column(
+                      children: [
+                        const Text(
+                          'Authentication required',
+                          style: TextStyle(fontSize: 18),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Please authenticate to view your identities',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                        const SizedBox(height: 24),
+                        ElevatedButton.icon(
+                          icon: _authMethod == 'biometric' 
+                              ? const Icon(Icons.fingerprint) 
+                              : const Icon(Icons.password),
+                          label: Text(_authMethod == 'biometric' 
+                              ? 'Authenticate with Biometrics' 
+                              : 'Authenticate with Password'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
+                          ),
+                          onPressed: _isAuthenticating
+                              ? null
+                              : () async {
+                                  debugPrint('Authenticate button pressed');
+                                  final authMethod = await _identityService.getAuthMethod();
+                                  debugPrint('Authentication method from button: $authMethod');
+                                  
+                                  final authenticated = await _authenticateUser();
+                                  debugPrint('Authentication result from button: $authenticated');
+                                  
+                                  if (authenticated) {
+                                    if (authMethod == 'password') {
+                                      // For password auth, load identities directly using the bypass method
+                                      debugPrint('Loading identities directly after password auth');
+                                      final identities = await _identityService.getIdentitiesAfterPasswordVerification();
+                                      debugPrint('Loaded ${identities.length} identities from button');
+                                      
+                                      if (mounted) {
+                                        setState(() {
+                                          _identities = identities;
+                                        });
+                                        
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            content: Text('Authentication successful'),
+                                            backgroundColor: Colors.green,
+                                          ),
+                                        );
+                                      }
+                                    } else {
+                                      // For biometric auth, reload identities normally
+                                      await _loadIdentities();
+                                      
+                                      if (mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            content: Text('Authentication successful'),
+                                            backgroundColor: Colors.green,
+                                          ),
+                                        );
+                                      }
+                                    }
+                                  }
+                                },
+                        ),
+                        const SizedBox(height: 16),
+                        TextButton(
+                          onPressed: _isAuthenticating
+                              ? null
+                              : () async {
+                                  // Show a confirmation dialog first
+                                  final shouldDisable = await showDialog<bool>(
+                                    context: context,
+                                    builder: (context) => AlertDialog(
+                                      title: const Text('Disable Authentication'),
+                                      content: const Text(
+                                        'Are you sure you want to disable authentication? '
+                                        'This will make your identities accessible without security.'),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () => Navigator.of(context).pop(false),
+                                          child: const Text('CANCEL'),
+                                        ),
+                                        TextButton(
+                                          onPressed: () => Navigator.of(context).pop(true),
+                                          child: const Text('DISABLE'),
+                                        ),
+                                      ],
+                                    ),
+                                  ) ?? false;
+                                  
+                                  if (!shouldDisable) return;
+                                  
+                                  debugPrint('Attempting to disable authentication');
+                                  final authenticated = await _authenticateUser();
+                                  debugPrint('Authentication for disabling: $authenticated');
+                                  
+                                  if (authenticated) {
+                                    await _identityService.setAuthenticationEnabled(false);
+                                    await _loadIdentities();
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Authentication disabled'),
+                                          backgroundColor: Colors.orange,
+                                        ),
+                                      );
+                                    }
+                                  }
+                                },
+                          child: const Text('Disable Authentication'),
+                        ),
+                        if (_isAuthenticating)
+                          const Padding(
+                            padding: EdgeInsets.only(top: 16),
+                            child: CircularProgressIndicator(),
+                          ),
+                      ],
+                    )
+                  else
+                    Column(
                           children: [
                             const Text(
                               'No identities found',
