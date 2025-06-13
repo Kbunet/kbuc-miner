@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'dart:io' show Platform;
 import 'package:miner_app/services/mining_service.dart';
 import 'package:miner_app/services/background_service.dart';
 import 'package:miner_app/services/notification_service.dart';
@@ -18,17 +20,22 @@ void main() async {
   final notificationService = NotificationService();
   await notificationService.init();
   
-  // Initialize Workmanager with custom configuration
-  await Workmanager().initialize(
-    callbackDispatcher,
-    isInDebugMode: false, // Set to false to reduce debug notifications
-  );
+  // Only initialize Workmanager on supported platforms (not on Windows or Web)
+  bool isWorkmanagerSupported = !kIsWeb && !Platform.isWindows;
   
-  // Register periodic task for background mining
-  await Workmanager().registerPeriodicTask(
-    'background-mining-task',
-    kBackgroundMiningTask,
-    frequency: const Duration(minutes: 15),
+  if (isWorkmanagerSupported) {
+    try {
+      // Initialize Workmanager with custom configuration
+      await Workmanager().initialize(
+        callbackDispatcher,
+        isInDebugMode: false, // Set to false to reduce debug notifications
+      );
+      
+      // Register periodic task for background mining
+      await Workmanager().registerPeriodicTask(
+        'background-mining-task',
+        kBackgroundMiningTask,
+        frequency: const Duration(minutes: 15),
     constraints: Constraints(
       networkType: NetworkType.not_required,
       requiresBatteryNotLow: false,
@@ -38,6 +45,10 @@ void main() async {
     ),
     existingWorkPolicy: ExistingWorkPolicy.replace,
   );
+    } catch (e) {
+      debugPrint('Error initializing Workmanager: $e');
+    }
+  }
   
   // Initialize background service
   final backgroundService = BackgroundMiningService();

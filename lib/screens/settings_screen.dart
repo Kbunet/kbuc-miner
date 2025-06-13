@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/node_settings.dart';
 import '../services/identity_service.dart';
+import '../services/mining_service.dart';
 import 'identity_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -67,6 +68,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (_formKey.currentState?.validate() ?? false) {
       _formKey.currentState?.save();
       await _settings.save();
+      
+      // Update mining service with new CPU cores setting
+      // This ensures the change takes effect immediately without app restart
+      final miningService = MiningService(); // Using the singleton instance
+      await miningService.updateCpuCores(_settings.cpuCores);
+      
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Settings saved successfully')),

@@ -208,17 +208,10 @@ class IdentityService {
       await _secureStorage.write(key: _identitiesKey, value: jsonString);
       
       // Also save the default identity ID in shared preferences for quick access
-      Identity? defaultIdentity;
-      try {
-        defaultIdentity = identities.firstWhere(
-          (identity) => identity.isDefault,
-        );
-      } catch (e) {
-        // No default identity found, use first if available
-        if (identities.isNotEmpty) {
-          defaultIdentity = identities.first;
-        }
-      }
+      final defaultIdentity = identities.firstWhere(
+        (identity) => identity.isDefault,
+        orElse: () => identities.isNotEmpty ? identities.first : null,
+      );
       
       if (defaultIdentity != null) {
         final prefs = await SharedPreferences.getInstance();
@@ -469,97 +462,6 @@ class IdentityService {
       await saveIdentities(updatedIdentities);
     } catch (e) {
       debugPrint('Error updating identity name: $e');
-      rethrow;
-    }
-  }
-  
-  // Export identities to JSON (excluding private keys)
-  Future<String> exportIdentitiesAsJson() async {
-    try {
-      // Get existing identities
-      final identities = await getIdentities();
-      
-      // Create a list of maps with only the necessary fields
-      final exportData = identities.map((identity) => {
-        'name': identity.name,
-        'address': identity.address,
-        'isDefault': identity.isDefault,
-        'isImported': true, // Always mark as imported when exporting
-      }).toList();
-      
-      // Convert to JSON
-      final jsonData = jsonEncode({
-        'identities': exportData,
-        'exportDate': DateTime.now().toIso8601String(),
-        'version': '1.0',
-      });
-      
-      return jsonData;
-    } catch (e) {
-      debugPrint('Error exporting identities: $e');
-      rethrow;
-    }
-  }
-  
-  // Import identities from JSON
-  Future<List<Identity>> importIdentitiesFromJson(String jsonData) async {
-    try {
-      // Parse the JSON data
-      final Map<String, dynamic> data = jsonDecode(jsonData);
-      
-      // Validate the data structure
-      if (!data.containsKey('identities') || data['identities'] is! List) {
-        throw Exception('Invalid JSON format: missing or invalid identities list');
-      }
-      
-      // Get the list of identity data
-      final List<dynamic> identitiesData = data['identities'];
-      
-      // Get existing identities to avoid duplicates
-      final existingIdentities = await getIdentities();
-      final existingAddresses = existingIdentities.map((e) => e.address).toSet();
-      
-      // Process each identity
-      final importedIdentities = <Identity>[];
-      for (final identityData in identitiesData) {
-        // Validate required fields
-        if (identityData is! Map<String, dynamic> ||
-            !identityData.containsKey('name') ||
-            !identityData.containsKey('address')) {
-          debugPrint('Skipping invalid identity data: $identityData');
-          continue;
-        }
-        
-        final String name = identityData['name'];
-        final String address = identityData['address'];
-        
-        // Skip if address is invalid
-        if (!_isValidAddress(address)) {
-          debugPrint('Skipping identity with invalid address: $address');
-          continue;
-        }
-        
-        // Skip if address already exists
-        if (existingAddresses.contains(address)) {
-          debugPrint('Skipping duplicate identity with address: $address');
-          continue;
-        }
-        
-        // Import the identity
-        final importedIdentity = Identity.importFromAddress(name, address);
-        importedIdentities.add(importedIdentity);
-        existingAddresses.add(address); // Prevent duplicates within the import
-      }
-      
-      // If any identities were imported, save them
-      if (importedIdentities.isNotEmpty) {
-        final allIdentities = [...existingIdentities, ...importedIdentities];
-        await saveIdentities(allIdentities);
-      }
-      
-      return importedIdentities;
-    } catch (e) {
-      debugPrint('Error importing identities: $e');
       rethrow;
     }
   }

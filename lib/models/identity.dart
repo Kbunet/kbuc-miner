@@ -9,6 +9,7 @@ import 'package:pointycastle/ecc/api.dart';
 import 'package:pointycastle/ecc/curves/secp256k1.dart';
 import 'package:convert/convert.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 
 /// Represents a Bitcoin-style identity with public and private keys
 class Identity {
@@ -21,9 +22,19 @@ class Identity {
   bool isDefault;
   final bool isImported; // Flag to indicate if this is an imported identity
   
+  // Identity type properties
+  String? ownerId; // Owner ID of the identity
+  bool isDomain = false; // Whether this is a domain identity
+  
   // Profile information from the node
   int rps = 0; // Resource Power Score
   int balance = 0; // Profile balance
+  int height = 0; // Blockchain height when profile info was loaded
+  int generatedRPs = 0; // Generated RPs since last snapshot
+  int ownedProfilesNo = 0; // Number of owned profiles
+  int nftSlots = 0; // Number of available NFT slots
+  double durability = 0.0; // Identity durability (0.0-1.0)
+  int currentBlockHeight = 0; // Current blockchain height
   bool hasLoadedProfileInfo = false; // Whether profile info has been loaded
   bool isLoadingProfileInfo = false; // Whether profile info is currently being loaded
 
@@ -36,8 +47,16 @@ class Identity {
     required this.createdAt,
     this.isDefault = false,
     this.isImported = false,
+    this.ownerId,
+    this.isDomain = false,
     this.rps = 0,
     this.balance = 0,
+    this.height = 0,
+    this.generatedRPs = 0,
+    this.ownedProfilesNo = 0,
+    this.nftSlots = 0,
+    this.durability = 0.0,
+    this.currentBlockHeight = 0,
     this.hasLoadedProfileInfo = false,
     this.isLoadingProfileInfo = false,
   });
@@ -206,6 +225,8 @@ class Identity {
     return bs58.base58.encode(keyWithChecksum);
   }
 
+
+
   /// Convert identity to a map for storage
   Map<String, dynamic> toMap() {
     return {
@@ -217,10 +238,18 @@ class Identity {
       'createdAt': createdAt.toIso8601String(),
       'isDefault': isDefault,
       'isImported': isImported,
+      'ownerId': ownerId,
+      'isDomain': isDomain,
       'rps': rps,
       'balance': balance,
+      'height': height,
+      'generatedRPs': generatedRPs,
+      'ownedProfilesNo': ownedProfilesNo,
+      'nftSlots': nftSlots,
       'hasLoadedProfileInfo': hasLoadedProfileInfo,
       'isLoadingProfileInfo': false, // Always reset to false when saving
+      'durability': durability, // Include durability for persistence
+      'currentBlockHeight': currentBlockHeight, // Include current block height
     };
   }
 
@@ -235,19 +264,61 @@ class Identity {
       createdAt: DateTime.parse(map['createdAt']),
       isDefault: map['isDefault'] ?? false,
       isImported: map['isImported'] ?? false,
+      ownerId: map['ownerId'],
+      isDomain: map['isDomain'] ?? false,
       rps: map['rps'] ?? 0,
       balance: map['balance'] ?? 0,
+      height: map['height'] ?? 0,
+      generatedRPs: map['generatedRPs'] ?? 0,
+      ownedProfilesNo: map['ownedProfilesNo'] ?? 0,
+      nftSlots: map['nftSlots'] ?? 0,
       hasLoadedProfileInfo: map['hasLoadedProfileInfo'] ?? false,
       isLoadingProfileInfo: false, // Always initialize as false
+      durability: map['durability'] ?? 0,
+      currentBlockHeight: map['currentBlockHeight'] ?? 0,
     );
   }
 
   /// Create a copy of this identity with updated fields
+  /// Get the identity type (Master, Domain, NFT, or Not Registered)
+  String getIdentityType() {
+    if (ownerId == null || ownerId!.isEmpty || rps <= 0) {
+      return 'Not Registered';
+    } else if (ownerId != null && address == ownerId) {
+      return 'Master';
+    } else if (isDomain) {
+      return 'Domain';
+    } else {
+      return 'NFT';
+    }
+  }
+  
+  /// Get color for the identity type badge
+  Color getIdentityTypeColor() {
+    if (ownerId == null || ownerId!.isEmpty || rps <= 0) {
+      return Colors.grey; // Not Registered
+    } else if (ownerId != null && address == ownerId) {
+      return Colors.purple; // Master
+    } else if (isDomain) {
+      return Colors.blue; // Domain
+    } else {
+      return Colors.green; // NFT
+    }
+  }
+
   Identity copyWith({
     String? name,
     bool? isDefault,
     int? rps,
     int? balance,
+    int? height,
+    int? generatedRPs,
+    int? ownedProfilesNo,
+    int? nftSlots,
+    double? durability,
+    int? currentBlockHeight,
+    String? ownerId,
+    bool? isDomain,
     bool? hasLoadedProfileInfo,
     bool? isLoadingProfileInfo,
   }) {
@@ -262,8 +333,15 @@ class Identity {
       isImported: isImported,
       rps: rps ?? this.rps,
       balance: balance ?? this.balance,
+      height: height ?? this.height,
+      generatedRPs: generatedRPs ?? this.generatedRPs,
+      ownedProfilesNo: ownedProfilesNo ?? this.ownedProfilesNo,
+      nftSlots: nftSlots ?? this.nftSlots,
+      ownerId: ownerId ?? this.ownerId,
+      isDomain: isDomain ?? this.isDomain,
       hasLoadedProfileInfo: hasLoadedProfileInfo ?? this.hasLoadedProfileInfo,
       isLoadingProfileInfo: isLoadingProfileInfo ?? this.isLoadingProfileInfo,
-    );
+    )..durability = durability ?? this.durability
+    ..currentBlockHeight = currentBlockHeight ?? this.currentBlockHeight;
   }
 }

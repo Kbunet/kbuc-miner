@@ -3,6 +3,8 @@ import '../services/node_service.dart';
 import '../models/node_settings.dart';
 import '../models/identity.dart';
 import '../services/identity_service.dart';
+import '../services/profile_service.dart';
+import '../models/blockchain_stats.dart';
 
 class CreateMiningJobDialog extends StatefulWidget {
   final Function(
@@ -26,9 +28,11 @@ class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
   final _formKey = GlobalKey<FormState>();
   final _nodeService = NodeService();
   final _identityService = IdentityService();
+  final _profileService = ProfileService();
   bool _isLoading = false;
   List<Identity> _identities = [];
   Identity? _selectedIdentity;
+  BlockchainStats? _blockchainStats;
 
   final _supportedHashController = TextEditingController(text: '0x' + '0' * 64);
   final _leaderController = TextEditingController();
@@ -45,6 +49,8 @@ class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
     _loadDefaultIdentity();
     // Automatically fetch leader information when the dialog opens
     _fetchLeaderInfo();
+    // Fetch blockchain stats for reward efficiency
+    _fetchBlockchainStats();
   }
   
   Future<void> _loadDefaultIdentity() async {
@@ -116,6 +122,19 @@ class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
       setState(() {
         _isLoading = false;
       });
+    }
+  }
+  
+  Future<void> _fetchBlockchainStats() async {
+    try {
+      final stats = await _profileService.getBlockchainStats();
+      if (mounted) {
+        setState(() {
+          _blockchainStats = stats;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error fetching blockchain stats: $e');
     }
   }
 
@@ -260,14 +279,50 @@ class _CreateMiningJobDialogState extends State<CreateMiningJobDialog> {
                   border: OutlineInputBorder(),
                   helperText: "'0' for Reputation Points, '1' for Coins",
                 ),
-                items: const [
+                items: [
                   DropdownMenuItem(
                     value: '0',
-                    child: Text('Reputation Points'),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text('Reputation Points'),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.green.shade100,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text(
+                            '100% Efficiency',
+                            style: TextStyle(fontSize: 12, color: Colors.green),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                   DropdownMenuItem(
                     value: '1',
-                    child: Text('Coins'),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text('Coins'),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.shade100,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            _blockchainStats != null 
+                                ? '${_blockchainStats!.formattedCoinRewardEfficiency} Efficiency' 
+                                : 'Loading...',
+                            style: TextStyle(fontSize: 12, color: Colors.blue.shade800),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
                 onChanged: (value) {

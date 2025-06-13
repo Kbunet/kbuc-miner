@@ -3,8 +3,9 @@ import 'dart:io';
 import 'dart:isolate';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
+import '../utils/safe_wakelock.dart';
 import 'package:workmanager/workmanager.dart';
 import 'mining_service.dart';
 
@@ -17,21 +18,18 @@ const String kForegroundServiceTask = 'foregroundServiceTask';
 @pragma('vm:entry-point')
 void callbackDispatcher() {
   Workmanager().executeTask((taskName, inputData) async {
-    debugPrint('Background task $taskName started');
+    // Background task started
     
     try {
-      // Try to enable wakelock but handle the case when there's no foreground activity
-      try {
-        await WakelockPlus.enable();
-      } catch (e) {
-        debugPrint('Warning: Could not enable wakelock: $e');
-        // Continue execution even if wakelock fails
-      }
+      // Tell SafeWakelock we're in a background context to avoid wakelock errors
+      SafeWakelock.setBackgroundContext(true);
+      
+      // Try to enable wakelock, but it will be a no-op in background
+      await SafeWakelock.enable(); // This is a no-op since wakelock is disabled
       
       switch (taskName) {
         case kForegroundServiceTask:
           // This task runs as a foreground service with a persistent notification
-          debugPrint('Starting foreground mining service');
           
           // Return true to indicate the task should run as a foreground service
           return true;
@@ -44,14 +42,13 @@ void callbackDispatcher() {
           final activeJobs = await miningService.getActiveJobs();
           
           if (activeJobs.isNotEmpty) {
-            debugPrint('Found ${activeJobs.length} active mining jobs');
-            
             // Process each active job
             for (final job in activeJobs) {
               if (!job.completed) {
-                debugPrint('Resuming mining job: ${job.id}');
+                // Get the current speed multiplier for this job if it exists
+                final speedMultiplier = await miningService.getJobSpeedMultiplier(job.id);
                 
-                // Resume mining job
+                // Resume mining job with the existing speed multiplier
                 await miningService.startMining(
                   jobId: job.id,
                   content: job.content,
@@ -64,7 +61,10 @@ void callbackDispatcher() {
                   endNonce: job.endNonce,
                   resumeFromNonce: job.lastTriedNonce,
                   workerLastNonces: job.workerLastNonces,
-                  onUpdate: (update) {},
+                  speedMultiplier: speedMultiplier, // Pass the speed multiplier directly
+                  onUpdate: (update) {
+                    // No logging in background mode
+                  },
                 );
               }
             }
@@ -72,7 +72,6 @@ void callbackDispatcher() {
             // Task completed successfully
             return true;
           } else {
-            debugPrint('No active mining jobs found');
             // Task completed successfully (even though there's nothing to do)
             return true;
           }
@@ -83,24 +82,27 @@ void callbackDispatcher() {
             final String title = inputData['title'] as String? ?? 'Mining Notification';
             final String message = inputData['message'] as String? ?? 'A mining task has completed';
             
-            debugPrint('Showing notification:');
-            debugPrint('Title: $title');
-            debugPrint('Message: $message');
+            // Wait for a while to let the mining job run
+            await Future.delayed(const Duration(minutes: 10));
             
-            // Return true to indicate success and show a notification
-            return Future<bool>.value(true);
+            // Save the job state before exiting
+            // Get mining service instance first
+            final miningService = MiningService();
+            await miningService.saveJobState();
           }
-          return Future<bool>.value(true);
           
+          // Always return success to avoid failure notifications
+          return Future.value(true);
         default:
           // Always return success to avoid failure notifications
-          debugPrint('Unknown task: $taskName');
           return true;
       }
     } catch (e) {
-      // Log the error but still return success to avoid failure notifications
-      debugPrint('Error in background task: $e');
-      return true;
+      // Still return success to avoid failure notifications
+      return Future.value(true);
+    } finally {
+      // Disable wakelock when done
+      await SafeWakelock.disable();
     }
   });
 }
@@ -118,13 +120,22 @@ class BackgroundMiningService {
     // Request necessary permissions
     await _requestPermissions();
     
-    // Initialize Workmanager with custom configuration
-    await Workmanager().initialize(
-      callbackDispatcher,
-      isInDebugMode: false, // Set to false to reduce debug notifications
-    );
+    // Only initialize Workmanager on supported platforms (not on Windows or Web)
+    bool isWorkmanagerSupported = !kIsWeb && !Platform.isWindows;
     
-    debugPrint('Background service initialized');
+    if (isWorkmanagerSupported) {
+      try {
+        // Initialize Workmanager with custom configuration
+        await Workmanager().initialize(
+          callbackDispatcher,
+          isInDebugMode: false, // Set to false to reduce debug notifications
+        );
+      } catch (e) {
+        debugPrint('Error initializing Workmanager in BackgroundMiningService: $e');
+      }
+    } else {
+      debugPrint('Workmanager not supported on this platform, skipping initialization');
+    }
   }
 
   // Request necessary permissions
@@ -135,7 +146,6 @@ class BackgroundMiningService {
       
       // Request ignore battery optimizations
       final batteryOptStatus = await Permission.ignoreBatteryOptimizations.request();
-      debugPrint('Battery optimization permission status: $batteryOptStatus');
       
       // Request foreground service permission for Android 9+
       if (Platform.isAndroid) {
@@ -144,7 +154,6 @@ class BackgroundMiningService {
         
         if (androidInfo.version.sdkInt >= 28) { // Android 9 (Pie) or higher
           final foregroundStatus = await Permission.systemAlertWindow.request();
-          debugPrint('Foreground service permission status: $foregroundStatus');
         }
       }
     }
@@ -153,90 +162,92 @@ class BackgroundMiningService {
   // Start the background service
   Future<bool> startService() async {
     if (!_isServiceRunning) {
-      // Request battery optimization exemption on real devices
-      if (Platform.isAndroid) {
-        final deviceInfo = DeviceInfoPlugin();
-        final androidInfo = await deviceInfo.androidInfo;
-        
-        // Check if this is a real device
-        final isRealDevice = androidInfo.isPhysicalDevice;
-        
-        if (isRealDevice) {
-          debugPrint('Running on a real device, requesting battery optimization exemption');
-          final hasPermission = await Permission.ignoreBatteryOptimizations.isGranted;
-          
-          if (!hasPermission) {
-            debugPrint('Requesting ignore battery optimizations permission');
-            final status = await Permission.ignoreBatteryOptimizations.request();
-            debugPrint('Ignore battery optimizations permission status: $status');
+      // Only use workmanager on supported platforms (not on Windows or Web)
+      bool isWorkmanagerSupported = !kIsWeb && !Platform.isWindows;
+      
+      if (isWorkmanagerSupported) {
+        try {
+          // Check if this is Android and request battery optimization exemption
+          if (Platform.isAndroid) {
+            final deviceInfo = DeviceInfoPlugin();
+            final androidInfo = await deviceInfo.androidInfo;
+            
+            // Check if this is a real device
+            final isRealDevice = androidInfo.isPhysicalDevice;
+            
+            if (isRealDevice) {
+              final hasPermission = await Permission.ignoreBatteryOptimizations.isGranted;
+              
+              if (!hasPermission) {
+                final status = await Permission.ignoreBatteryOptimizations.request();
+              }
+            }
           }
+          
+          // First, register a foreground service task that will keep the app running
+          // This is critical for real devices to prevent the OS from killing the app
+          await Workmanager().registerOneOffTask(
+            'foreground-service-task',
+            kForegroundServiceTask,
+            existingWorkPolicy: ExistingWorkPolicy.replace,
+            inputData: {
+              'title': 'KBUC Miner Running',
+              'message': 'Mining in progress',
+            },
+            constraints: Constraints(
+              networkType: NetworkType.not_required,
+              requiresBatteryNotLow: false,
+              requiresCharging: false,
+              requiresDeviceIdle: false,
+              requiresStorageNotLow: false,
+            ),
+          );
+          
+          // Register a periodic task with more frequent checks for real devices
+          await Workmanager().registerPeriodicTask(
+            'mining-task-periodic',
+            kBackgroundMiningTask,
+            frequency: const Duration(minutes: 15),
+            constraints: Constraints(
+              networkType: NetworkType.not_required, // Don't require network connection
+              requiresBatteryNotLow: false,
+              requiresCharging: false,
+              requiresDeviceIdle: false,
+              requiresStorageNotLow: false,
+            ),
+            existingWorkPolicy: ExistingWorkPolicy.replace,
+            backoffPolicy: BackoffPolicy.linear,
+            backoffPolicyDelay: const Duration(minutes: 1),
+          );
+          
+          // Register multiple one-time tasks with different delays to ensure execution
+          for (int i = 0; i < 3; i++) {
+            await Workmanager().registerOneOffTask(
+              'mining-task-immediate-$i',
+              kBackgroundMiningTask,
+              initialDelay: Duration(minutes: i * 2), // Stagger the tasks with shorter intervals
+              constraints: Constraints(
+                networkType: NetworkType.not_required, // Don't require network connection
+                requiresBatteryNotLow: false,
+                requiresCharging: false,
+                requiresDeviceIdle: false,
+                requiresStorageNotLow: false,
+              ),
+              existingWorkPolicy: ExistingWorkPolicy.keep,
+            );
+          }
+        } catch (e) {
+          debugPrint('Error registering workmanager tasks: $e');
         }
-      }
-      
-      // First, register a foreground service task that will keep the app running
-      // This is critical for real devices to prevent the OS from killing the app
-      await Workmanager().registerOneOffTask(
-        'foreground-service-task',
-        kForegroundServiceTask,
-        existingWorkPolicy: ExistingWorkPolicy.replace,
-        inputData: {
-          'title': 'KBUC Miner Running',
-          'message': 'Mining in progress',
-        },
-        constraints: Constraints(
-          networkType: NetworkType.not_required,
-          requiresBatteryNotLow: false,
-          requiresCharging: false,
-          requiresDeviceIdle: false,
-          requiresStorageNotLow: false,
-        ),
-        // Note: For foreground service, we'll need to handle this differently
-        // The Workmanager version we're using doesn't directly support foreground services
-      );
-      
-      // Register a periodic task with more frequent checks for real devices
-      await Workmanager().registerPeriodicTask(
-        'mining-task-periodic',
-        kBackgroundMiningTask,
-        frequency: const Duration(minutes: 15),
-        constraints: Constraints(
-          networkType: NetworkType.not_required, // Don't require network connection
-          requiresBatteryNotLow: false,
-          requiresCharging: false,
-          requiresDeviceIdle: false,
-          requiresStorageNotLow: false,
-        ),
-        existingWorkPolicy: ExistingWorkPolicy.replace,
-        backoffPolicy: BackoffPolicy.linear,
-        backoffPolicyDelay: const Duration(minutes: 1),
-      );
-      
-      // Register multiple one-time tasks with different delays to ensure execution
-      for (int i = 0; i < 3; i++) {
-        await Workmanager().registerOneOffTask(
-          'mining-task-immediate-$i',
-          kBackgroundMiningTask,
-          initialDelay: Duration(minutes: i * 2), // Stagger the tasks with shorter intervals
-          constraints: Constraints(
-            networkType: NetworkType.not_required, // Don't require network connection
-            requiresBatteryNotLow: false,
-            requiresCharging: false,
-            requiresDeviceIdle: false,
-            requiresStorageNotLow: false,
-          ),
-          existingWorkPolicy: ExistingWorkPolicy.keep,
-        );
+      } else {
+        debugPrint('Workmanager not supported on this platform, skipping task registration');
       }
       
       _isServiceRunning = true;
       
-      // Enable wakelock to keep screen on
-      try {
-        await WakelockPlus.enable();
-      } catch (e) {
-        debugPrint('Warning: Could not enable wakelock: $e');
-        // Continue execution even if wakelock fails
-      }
+      // Use SafeWakelock which will handle wakelock operations safely
+      SafeWakelock.setBackgroundContext(false); // We're in foreground when starting the service
+      await SafeWakelock.enable(); // This will only work in foreground context
       
       return true;
     }
@@ -247,13 +258,25 @@ class BackgroundMiningService {
   // Stop the background service
   Future<bool> stopService() async {
     if (_isServiceRunning) {
-      // Cancel all tasks
-      await Workmanager().cancelAll();
+      // Only use workmanager on supported platforms (not on Windows or Web)
+      bool isWorkmanagerSupported = !kIsWeb && !Platform.isWindows;
+      
+      if (isWorkmanagerSupported) {
+        try {
+          // Cancel all tasks
+          await Workmanager().cancelAll();
+        } catch (e) {
+          debugPrint('Error canceling workmanager tasks: $e');
+        }
+      } else {
+        debugPrint('Workmanager not supported on this platform, skipping task cancellation');
+      }
       
       _isServiceRunning = false;
       
-      // Disable wakelock
-      await WakelockPlus.disable();
+      // Use SafeWakelock which will handle wakelock operations safely
+      SafeWakelock.setBackgroundContext(false); // We're in foreground when stopping the service
+      await SafeWakelock.disable(); // This will only work in foreground context
       
       return true;
     }
@@ -274,6 +297,7 @@ class BackgroundMiningService {
   Future<void> sendData(Map<String, dynamic> data) async {
     // With Workmanager approach, we don't directly send data to the service
     // Instead, we rely on the service to read the latest state from the MiningService
-    debugPrint('Data will be picked up by the next task execution: ${data.toString()}');
   }
+  
+  // Method removed - formatting logic moved inline to callback
 }

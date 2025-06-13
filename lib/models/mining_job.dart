@@ -25,6 +25,7 @@ class MiningJob {
   final int? completedNonce;
   final String? completedHash;
   final Map<int, int> workerLastNonces; // Map of worker ID to last processed nonce
+  final double? speedMultiplier; // Store the speed multiplier for background task resumption
 
   // Add getters for compatibility with new code
   bool get isCompleted => completed;
@@ -54,6 +55,7 @@ class MiningJob {
     this.completedNonce,
     this.completedHash,
     Map<int, int>? workerLastNonces,
+    this.speedMultiplier,
   }) : this.workerLastNonces = workerLastNonces ?? {};
 
   Duration? get duration {
@@ -85,6 +87,7 @@ class MiningJob {
     'completedNonce': completedNonce,
     'completedHash': completedHash,
     'workerLastNonces': workerLastNonces.map((key, value) => MapEntry(key.toString(), value)), // Convert int keys to strings for JSON serialization
+    'speedMultiplier': speedMultiplier, // Store speed multiplier for background resumption
   };
 
   factory MiningJob.fromJson(Map<String, dynamic> json) {
@@ -121,6 +124,7 @@ class MiningJob {
       completedNonce: json['completedNonce'],
       completedHash: json['completedHash'],
       workerLastNonces: workerNonces,
+      speedMultiplier: json['speedMultiplier'] != null ? (json['speedMultiplier'] as num).toDouble() : null,
     );
   }
 
@@ -148,6 +152,7 @@ class MiningJob {
     int? completedNonce,
     String? completedHash,
     Map<int, int>? workerLastNonces,
+    double? speedMultiplier,
   }) {
     return MiningJob(
       id: id ?? this.id,
@@ -173,6 +178,7 @@ class MiningJob {
       completedNonce: completedNonce ?? this.completedNonce,
       completedHash: completedHash ?? this.completedHash,
       workerLastNonces: workerLastNonces ?? this.workerLastNonces,
+      speedMultiplier: speedMultiplier ?? this.speedMultiplier,
     );
   }
 

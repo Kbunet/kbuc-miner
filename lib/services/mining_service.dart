@@ -114,6 +114,7 @@ class MiningService {
     required Function(Map<String, dynamic>) onUpdate,
     int? resumeFromNonce,
     Map<int, int>? workerLastNonces,
+    double? speedMultiplier,
   }) async {
     await _lock.synchronized(() async {
       // Check if the job is already running
@@ -141,11 +142,20 @@ class MiningService {
         completed: false,
         successful: false,
         workerLastNonces: workerLastNonces ?? {}, // Initialize with provided worker nonces or empty map
+        speedMultiplier: speedMultiplier, // Store the provided speed multiplier
       );
+      
+      // Initialize speed multiplier from parameter, stored job, or default to 1.0
+      if (speedMultiplier != null) {
+        _speedMultipliers[jobId] = speedMultiplier;
+      } else if (job.speedMultiplier != null) {
+        _speedMultipliers[jobId] = job.speedMultiplier!;
+      } else if (!_speedMultipliers.containsKey(jobId)) {
+        _speedMultipliers[jobId] = 1.0;
+      }
       
       // Add to active jobs
       _activeJobs[jobId] = job;
-      _speedMultipliers[jobId] = 1.0;
       _hashRateHistory[jobId] = [];
       _jobWorkers[jobId] = [];
       
@@ -239,16 +249,22 @@ class MiningService {
       
       // Save the job state to persist it
       if (_activeJobs[jobId] != null) {
+        // Make sure the job has the current speed multiplier before saving
+        final jobWithSpeed = _activeJobs[jobId]!.copyWith(
+          speedMultiplier: _speedMultipliers[jobId],
+        );
+        _activeJobs[jobId] = jobWithSpeed;
+        
         // Check if the job already exists in storage
         final existingJob = await _jobService.getJob(jobId);
         if (existingJob != null) {
           // Update the existing job instead of adding a new one
-          await _jobService.updateJob(_activeJobs[jobId]!);
-          debugPrint('Updated existing job $jobId in storage');
+          await _jobService.updateJob(jobWithSpeed);
+          debugPrint('Updated existing job $jobId in storage with speed multiplier ${_speedMultipliers[jobId]}');
         } else {
           // This is a new job, add it
-          await _jobService.addJob(_activeJobs[jobId]!);
-          debugPrint('Added new job $jobId to storage');
+          await _jobService.addJob(jobWithSpeed);
+          debugPrint('Added new job $jobId to storage with speed multiplier ${_speedMultipliers[jobId]}');
         }
       }
     });
@@ -563,13 +579,30 @@ class MiningService {
     }
   }
 
-  void updateSpeed(String jobId, double multiplier) {
-    _speedMultipliers[jobId] = multiplier;
-    // Only send command if we have an active send port
-    if (_jobWorkers.containsKey(jobId)) {
-      _jobWorkers[jobId]!.forEach((worker) {
-        _workerSendPorts[jobId]![worker.id]?.send({'command': 'speed', 'value': multiplier});
-      });
+  Future<void> updateSpeed(String jobId, double multiplier) async {
+    if (_activeJobs.containsKey(jobId)) {
+      _speedMultipliers[jobId] = multiplier;
+      
+      // Update the job with the new speed multiplier
+      final updatedJob = _activeJobs[jobId]!.copyWith(
+        speedMultiplier: multiplier,
+      );
+      _activeJobs[jobId] = updatedJob;
+      
+      // Save the updated job to storage to persist the speed multiplier
+      await _jobService.updateJob(updatedJob);
+      
+      // Send speed update to all workers
+      if (_workerSendPorts.containsKey(jobId)) {
+        for (final workerId in _workerSendPorts[jobId]!.keys) {
+          _workerSendPorts[jobId]![workerId]?.send({
+            'command': 'speed',
+            'value': multiplier,
+          });
+        }
+      }
+      
+      debugPrint('Updated speed multiplier for job $jobId to $multiplier');
     }
   }
 
@@ -867,175 +900,188 @@ class MiningService {
       'activeWorkers': activeWorkers,
       'currentNonce': currentNonce,
     };
-    
-    // Broadcast job update
-    _broadcastJobUpdate(jobId);
   }
 
-  // Handle solution found
-  void _handleSolution(Map<String, dynamic> update, String jobId, MiningJob job, Function(Map<String, dynamic>) callback) {
-    final workerId = update['workerId'] as int;
-    final nonce = update['nonce'] as int;
-    final hash = update['hash'] as String;
-    
-    // Update job's worker nonce state
-    Map<int, int> updatedWorkerNonces = Map.from(job.workerLastNonces);
-    updatedWorkerNonces[workerId] = nonce;
-    
-    // Update the job with the solution
-    final updatedJob = job.copyWith(
-      completed: true,
-      successful: true,
-      endTime: DateTime.now(),
-      foundNonce: nonce,
-      foundHash: hash,
-      workerLastNonces: updatedWorkerNonces
-    );
-    
-    if (_activeJobs[jobId] != null) {
-      _activeJobs[jobId] = updatedJob;
-    }
-    
-    // Move to completed jobs
-    _completedJobs[jobId] = updatedJob;
-    
-    // Save the job state to persistent storage
-    _jobService.updateJob(updatedJob).then((_) {
-      debugPrint('Solution found for job $jobId saved to persistent storage');
-    }).catchError((error) {
-      debugPrint('Error saving solution for job $jobId to persistent storage: $error');
-    });
-    
-    // Save the job state
-    saveJobState();
-    
-    // Broadcast the ticket to the node
-    _broadcastTicket(jobId, updatedJob, nonce).then((_) {
-      debugPrint('Ticket for job $jobId broadcast successfully');
-      
-      // Update job stats - only if the job is still in active jobs
-      if (_activeJobs.containsKey(jobId)) {
-        _updateJobStats(jobId);
+  Future<void> _handleSolution(Map<String, dynamic> update, String jobId, MiningJob job, Function(Map<String, dynamic>) callback) async {
+    // Use a lock to prevent race conditions when multiple workers find solutions at nearly the same time
+    return await _lock.synchronized(() async {
+      // Check if the job is already completed (another worker might have found a solution)
+      if (job.completed || !_activeJobs.containsKey(jobId)) {
+        debugPrint('Job $jobId is already completed or no longer active, ignoring solution');
+        return;
       }
       
-      // Notify listeners through the stream controller directly
-      // instead of using _broadcastJobUpdate which might fail if the job is removed
-      _jobUpdateController.add({
-        'jobId': jobId,
-        'progress': 100.0,
-        'hashRate': 0.0,
-        'remainingTime': 0.0,
-        'currentNonce': nonce,
-        'workerDetails': _jobWorkers[jobId]?.map((worker) => {
-          'workerId': worker.id,
-          'lastNonce': worker.lastProcessedNonce,
-          'status': worker.status,
-          'hashRate': worker.hashRate,
-          'startNonce': worker.currentBatchStart,
-          'endNonce': worker.currentBatchEnd,
-          'isActive': worker.isActive,
-        }).toList() ?? [],
-        'isPaused': false,
-        'isCompleted': true,
-        'isSuccessful': true,
-      });
+      final workerId = update['workerId'] as int;
+      final nonce = update['nonce'] as int;
+      final hash = update['hash'] as String;
       
-    }).catchError((error) {
-      debugPrint('Error broadcasting ticket for job $jobId: $error');
+      debugPrint('Solution found by worker $workerId for job $jobId with nonce $nonce');
       
-      // Even if broadcasting fails, update the UI directly
-      // instead of using _broadcastJobUpdate which might fail if the job is removed
-      _jobUpdateController.add({
-        'jobId': jobId,
-        'progress': 100.0,
-        'hashRate': 0.0,
-        'remainingTime': 0.0,
-        'currentNonce': nonce,
-        'workerDetails': _jobWorkers[jobId]?.map((worker) => {
-          'workerId': worker.id,
-          'lastNonce': worker.lastProcessedNonce,
-          'status': worker.status,
-          'hashRate': worker.hashRate,
-          'startNonce': worker.currentBatchStart,
-          'endNonce': worker.currentBatchEnd,
-          'isActive': worker.isActive,
-        }).toList() ?? [],
-        'isPaused': false,
-        'isCompleted': true,
-        'isSuccessful': true,
-        'broadcastError': error.toString(),
-      });
-    });
-    
-    // Notify listeners
-    _jobCompletedController.add({
-      'jobId': jobId,
-      'status': 'found',
-      'job': updatedJob.toJson(),
-      'nonce': nonce,
-      'hash': hash,
-      'foundNonce': nonce,
-      'foundHash': hash,
-    });
-    
-    // Call the callback
-    callback({
-      'jobId': jobId,
-      'status': 'found',
-      'job': updatedJob.toJson(),
-      'nonce': nonce,
-      'hash': hash,
-      'foundNonce': nonce,
-      'foundHash': hash,
-    });
-  }
-
-  // Complete a job (success or failure)
-  void _completeJob(String jobId, bool successful, int? foundNonce, String? foundHash, Function(Map<String, dynamic>) onUpdate) {
-    // Update job status
-    if (_activeJobs.containsKey(jobId)) {
-      final job = _activeJobs[jobId]!;
+      // Immediately stop all other workers to prevent them from finding another solution
+      await _stopAllWorkersExcept(jobId, workerId);
+      
+      // Update job's worker nonce state
+      Map<int, int> updatedWorkerNonces = Map.from(job.workerLastNonces);
+      updatedWorkerNonces[workerId] = nonce;
+      
+      // Update the job with the solution
       final updatedJob = job.copyWith(
         completed: true,
-        successful: successful,
-        foundNonce: foundNonce,
-        foundHash: foundHash,
-        endTime: DateTime.now(), // Ensure we set the end time
+        successful: true,
+        endTime: DateTime.now(),
+        foundNonce: nonce,
+        foundHash: hash,
+        workerLastNonces: updatedWorkerNonces,
+        speedMultiplier: _speedMultipliers[jobId] // Preserve the speed multiplier
       );
       
-      _activeJobs[jobId] = updatedJob;
+      if (_activeJobs[jobId] != null) {
+        _activeJobs[jobId] = updatedJob;
+      }
       
       // Move to completed jobs
       _completedJobs[jobId] = updatedJob;
-      _activeJobs.remove(jobId);
-      _pausedJobs.remove(jobId);
       
-      // Save the job to persistent storage
-      _jobService.updateJob(updatedJob).then((_) {
-        debugPrint('Job $jobId saved to persistent storage');
-      }).catchError((error) {
-        debugPrint('Error saving job $jobId to persistent storage: $error');
-      });
+      // Save the job state to persistent storage
+      try {
+        await _jobService.updateJob(updatedJob);
+        debugPrint('Solution found for job $jobId saved to persistent storage');
+      } catch (error) {
+        debugPrint('Error saving solution for job $jobId to persistent storage: $error');
+      }
+      
+      // Save the job state
+      await saveJobState();
+      
+      // Broadcast the ticket to the node
+      try {
+        await _broadcastTicket(jobId, updatedJob, nonce);
+        debugPrint('Ticket for job $jobId broadcast successfully');
+        
+        // Update job stats - only if the job is still in active jobs
+        if (_activeJobs.containsKey(jobId)) {
+          _updateJobStats(jobId);
+        }
+        
+        // Notify listeners through the stream controller directly
+        _jobUpdateController.add({
+          'jobId': jobId,
+          'progress': 100.0,
+          'hashRate': 0.0,
+          'remainingTime': 0.0,
+          'currentNonce': nonce,
+          'workerDetails': _jobWorkers[jobId]?.map((worker) => {
+            'workerId': worker.id,
+            'lastNonce': worker.lastProcessedNonce,
+            'status': worker.status,
+            'hashRate': worker.hashRate,
+            'startNonce': worker.currentBatchStart,
+            'endNonce': worker.currentBatchEnd,
+            'isActive': worker.isActive,
+          }).toList() ?? [],
+          'isPaused': false,
+          'isCompleted': true,
+          'isSuccessful': true,
+        });
+      } catch (error) {
+        debugPrint('Error broadcasting ticket for job $jobId: $error');
+        
+        // Even if broadcasting fails, update the UI directly
+        _jobUpdateController.add({
+          'jobId': jobId,
+          'progress': 100.0,
+          'hashRate': 0.0,
+          'remainingTime': 0.0,
+          'currentNonce': nonce,
+          'workerDetails': _jobWorkers[jobId]?.map((worker) => {
+            'workerId': worker.id,
+            'lastNonce': worker.lastProcessedNonce,
+            'status': worker.status,
+            'hashRate': worker.hashRate,
+            'startNonce': worker.currentBatchStart,
+            'endNonce': worker.currentBatchEnd,
+            'isActive': worker.isActive,
+          }).toList() ?? [],
+          'isPaused': false,
+          'isCompleted': true,
+          'isSuccessful': true,
+          'broadcastError': error.toString(),
+        });
+      }
       
       // Notify listeners
-      final status = successful ? 'found' : 'completed';
-      
-      // Notify through the job completed stream
       _jobCompletedController.add({
         'jobId': jobId,
-        'status': status,
-        'foundNonce': foundNonce,
-        'foundHash': foundHash,
+        'status': 'found',
+        'job': updatedJob.toJson(),
+        'nonce': nonce,
+        'hash': hash,
+        'foundNonce': nonce,
+        'foundHash': hash,
       });
       
-      // Also notify through the callback for backward compatibility
-      onUpdate({
+      // Call the callback
+      callback({
         'jobId': jobId,
-        'status': status,
-        'foundNonce': foundNonce,
-        'foundHash': foundHash,
+        'status': 'found',
+        'job': updatedJob.toJson(),
+        'nonce': nonce,
+        'hash': hash,
+        'foundNonce': nonce,
+        'foundHash': hash,
       });
+    });
+  }
+
+  // Complete a job with success/failure status and optional nonce/hash
+  Future<void> _completeJob(String jobId, bool successful, int? foundNonce, String? foundHash, Function(Map<String, dynamic>) onUpdate) async {
+    if (!_activeJobs.containsKey(jobId)) {
+      debugPrint('Job $jobId not found for completion');
+      return;
     }
+    
+    final job = _activeJobs[jobId]!;
+    final updatedJob = job.copyWith(
+      completed: true,
+      successful: successful,
+      foundNonce: foundNonce,
+      foundHash: foundHash,
+      endTime: DateTime.now(), // Ensure we set the end time
+      speedMultiplier: _speedMultipliers[jobId], // Preserve the speed multiplier
+    );
+    
+    _activeJobs[jobId] = updatedJob;
+    
+    // Move to completed jobs
+    _completedJobs[jobId] = updatedJob;
+    _activeJobs.remove(jobId);
+    _pausedJobs.remove(jobId);
+    
+    // Save the job to persistent storage
+    _jobService.updateJob(updatedJob).then((_) {
+      debugPrint('Job $jobId saved to persistent storage');
+    }).catchError((error) {
+      debugPrint('Error saving job $jobId to persistent storage: $error');
+    });
+    
+    // Notify listeners
+    final status = successful ? 'found' : 'completed';
+    
+    // Notify through the job completed stream
+    _jobCompletedController.add({
+      'jobId': jobId,
+      'status': status,
+      'foundNonce': foundNonce,
+      'foundHash': foundHash,
+    });
+    
+    // Also notify through the callback for backward compatibility
+    onUpdate({
+      'jobId': jobId,
+      'status': status,
+      'foundNonce': foundNonce,
+      'foundHash': foundHash,
+    });
   }
 
   // Broadcast job updates to listeners
@@ -1181,10 +1227,26 @@ class MiningService {
     return await _jobService.getJob(jobId);
   }
 
-  // Get a list of active jobs
+  // Get all active jobs
   Future<List<MiningJob>> getActiveJobs() async {
-    // Get active jobs from the job service instead of just in-memory jobs
     return await _jobService.getActiveJobs();
+  }
+  
+  // Get the speed multiplier for a job
+  Future<double> getJobSpeedMultiplier(String jobId) async {
+    // First check if we have the speed multiplier in memory
+    if (_speedMultipliers.containsKey(jobId)) {
+      return _speedMultipliers[jobId]!;
+    }
+    
+    // If not in memory, try to get it from the stored job
+    final job = await _jobService.getJob(jobId);
+    if (job != null && job.speedMultiplier != null) {
+      return job.speedMultiplier!;
+    }
+    
+    // Default to 1.0 if not found
+    return 1.0;
   }
 
   /// Returns only the jobs that are currently active in memory
@@ -1380,10 +1442,11 @@ class MiningService {
           updatedWorkerNonces[worker.id] = worker.lastProcessedNonce;
         }
         
-        // Create an updated job with the latest nonce information
+        // Create an updated job with the latest nonce information and speed multiplier
         final updatedJob = job.copyWith(
           lastTriedNonce: highestNonce,
           workerLastNonces: updatedWorkerNonces,
+          speedMultiplier: _speedMultipliers[jobId],
         );
         
         // Update the job in the service
@@ -1877,4 +1940,6 @@ class MiningService {
       'sortOptions': JobSortOption.values,
     };
   }
+  
+  // The getJobSpeedMultiplier method is already defined earlier in this class
 }

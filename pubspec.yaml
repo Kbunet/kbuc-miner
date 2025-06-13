@@ -48,12 +48,19 @@ dependencies:
   # For biometric authentication
   local_auth: ^2.1.8
   local_auth_android: ^1.0.47
+  local_auth_windows: ^1.0.11
   # For QR code generation
   qr_flutter: ^4.1.0
   # For cryptographic operations
   pointycastle: ^3.7.3
   # For Base58 encoding (used in WIF format)
   bs58: ^1.0.2
+  # For file path operations
+  path_provider: ^2.1.1
+  # For saving files on mobile and desktop
+  file_saver: ^0.2.9
+  # For picking files on mobile and desktop
+  file_picker: ^6.1.1
 
 dev_dependencies:
   flutter_test:
